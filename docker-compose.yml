@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=/app/data/app.db
+      - PDF_STORAGE_PATH=/app/uploads/pdfs
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FRONTEND_URL=http://localhost:5173
+    volumes:
+      - backend_data:/app/data
+      - backend_pdfs:/app/uploads/pdfs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  backend_pdfs:
