@@ -2,14 +2,14 @@ export interface Contact {
   id: string;
   type: 'Постачальник' | 'Покупець';
   fullName: string;
-  inn: string;        // ІПН / код ДРФО
-  edrpou: string;     // ЄДРПОУ
-  iban: string;       // банківський рахунок
-  bank: string;       // назва банку
+  inn: string;
+  edrpou: string;
+  iban: string;
+  bank: string;
   address: string;
   phone: string;
   email: string;
-  group: string;      // ФОП група
+  group: string;
   additionalCode: string;
   createdAt: string;
   updatedAt: string;

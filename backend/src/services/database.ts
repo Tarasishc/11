@@ -4,7 +4,6 @@ import fs from 'fs';
 
 const DB_PATH = process.env.DATABASE_URL || path.join(__dirname, '../../data/app.db');
 
-// Ensure data directory exists
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });

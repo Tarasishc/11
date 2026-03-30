@@ -6,4 +6,3 @@ data/
 uploads/pdfs/*.pdf
 .DS_Store
 *.log
-

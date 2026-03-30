@@ -8,8 +8,7 @@
     "start": "node dist/server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build:all": "cd ../frontend && npm install && npm run build && cd ../backend && npm run build",
-    "start:prod": "npm run build:all && node dist/server.js",
-    "test": "jest"
+    "start:prod": "npm run build:all && node dist/server.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
