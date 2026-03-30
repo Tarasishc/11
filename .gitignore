@@ -3,7 +3,7 @@ dist/
 .env
 data/
 *.db
-**/*.pdf
+uploads/pdfs/*.pdf
 .DS_Store
 *.log
 

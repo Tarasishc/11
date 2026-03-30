@@ -41,69 +41,59 @@
 - Індикатори завантаження
 - Toast сповіщення
 
-## Швидкий старт
-
-### 1. Встановлення залежностей
+## Запуск через Docker (рекомендовано)
 
 ```bash
-# Backend
+git clone <repo-url>
+cd 11
+
+# Опціонально: вкажіть OpenAI ключ
+export OPENAI_API_KEY=sk-...
+
+# Збудувати та запустити
+docker compose up --build
+```
+
+Відкрий: **http://localhost:3000**
+
+---
+
+## Локальний запуск (без Docker)
+
+### 1. Встановлення та збірка
+
+```bash
 cd backend
+cp .env.example .env        # відредагуй за потреби
 npm install
 
-# Frontend
 cd ../frontend
 npm install
+npm run build               # збирає в backend/public/
 ```
 
-### 2. Налаштування змінних середовища
+### 2. Запуск
 
 ```bash
 cd backend
-cp .env.example .env
+npm start
 ```
 
-Відредагуйте `.env`:
-```env
-OPENAI_API_KEY=sk-...     # Ключ OpenAI API (необов'язково, є fallback)
-DATABASE_URL=./data/app.db
-PORT=3000
-PDF_STORAGE_PATH=./uploads/pdfs
-FRONTEND_URL=http://localhost:5173
-```
+Відкрий: **http://localhost:3000**
 
-> **Примітка:** Якщо `OPENAI_API_KEY` не вказано, документи генеруються локально без GPT-4.
+> **OpenAI ключ необов'язковий** — без нього документи генеруються локально.
 
-### 3. Запуск у режимі розробки
+---
 
-**Terminal 1 — Backend:**
-```bash
-cd backend
-npm run dev
-```
-
-**Terminal 2 — Frontend:**
-```bash
-cd frontend
-npm run dev
-```
-
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:3000
-- Swagger docs: http://localhost:3000/api/docs
-
-## Docker розгортання
+## Режим розробки (hot-reload)
 
 ```bash
-# Скопіюйте .env
-cp backend/.env.example backend/.env
-# Відредагуйте backend/.env, вкажіть OPENAI_API_KEY
+# Terminal 1
+cd backend && npm run dev
 
-# Запустіть
-docker-compose up -d
+# Terminal 2
+cd frontend && npm run dev   # → http://localhost:5173
 ```
-
-- Додаток: http://localhost:5173
-- API: http://localhost:3000
 
 ## API Endpoints
 
