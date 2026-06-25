@@ -1,35 +1,23 @@
 //@version=5
 // ============================================================================
 //  BTC REGIME SYSTEM — Long у бику + Short у ведмежці (єдина система)
-//  ----------------------------------------------------------------------------
-//  Розділяє ринок по EMA200 і торгує те, що підходить режиму:
-//    • Ціна НАД EMA200 (бик)  → ЛОНГ:  Bollinger-пробій / VMC-перепроданість / RSI2
-//    • Ціна ПІД EMA200 + EMA50<EMA200 (ведмідь) → ШОРТ: RSI-rip / відбій EMA100 / крос EMA50
-//    • Між (close<EMA200, але EMA50>EMA200) → пауза (перехідна зона)
-//  Один шорт/лонг за раз (OR-злиття тригерів). Таймфрейм: 4H.
-//
-//  Сигнали:  ▲ LONG / ▼ SHORT — вхід,  ✕ EXIT — вихід (трейлінг-стоп).
-//  Лінія — поточний стоп. Фон: зелений=бик, червоний=ведмідь.
-//
-//  Бектест (BTC 2017-2026): лонг ~6%/міс у бику; шорт +122% сумарно по бар-ринках.
-//  Профіль low-winrate/high-payoff: багато дрібних стопів, прибуток — рідкісні
-//  великі рухи. НЕ кожна фаза прибуткова. Ризик 1-1.5% на угоду.
+//  Над EMA200 = ЛОНГ (Bollinger / VMC / RSI2); під EMA200 + EMA50<EMA200 = ШОРТ.
+//  Таймфрейм: 4H.  ▲LONG / ▼SHORT — вхід, ✕EXIT — вихід.
+//  Лінії: біла=ТВХ(вхід), червона=стоп, зелена=тейк. Фон: зелений=бик, червоний=ведмідь.
 // ============================================================================
-
 indicator("BTC Regime System (Long+Short)", shorttitle="RegimeSys", overlay=true, max_labels_count=500)
 
-// ---------------- INPUTS ----------------
 gT="Тренд / режим"
 emaFastLen=input.int(50, "EMA Fast (50)", group=gT)
 emaSlowLen=input.int(200,"EMA Slow (200)", group=gT)
 emaMidLen =input.int(100,"EMA Mid (100)",  group=gT)
 
 gL="ЛОНГ-входи (бик)"
-useBB   =input.bool(true,"Bollinger-пробій (close > верхня смуга)", group=gL)
+useBB   =input.bool(true,"Bollinger-пробій", group=gL)
 bbLen   =input.int(20,"BB Length", group=gL)
 bbMult  =input.float(2.0,"BB Mult", step=0.1, group=gL)
-useVMC  =input.bool(true,"VMC-перепроданість (WT крос вгору ≤ -53)", group=gL)
-useRSI2 =input.bool(true,"RSI(2) < 10 (екстрем перепроданість)", group=gL)
+useVMC  =input.bool(true,"VMC-перепроданість (WT крос ≤ -53)", group=gL)
+useRSI2 =input.bool(true,"RSI(2) < 10", group=gL)
 lStop   =input.float(1.5,"Лонг: стоп (×ATR)", step=0.25, group=gL)
 lTrail  =input.float(4.0,"Лонг: трейл (×ATR)", step=0.5, group=gL)
 
@@ -41,11 +29,14 @@ useCross50=input.bool(true,"Ралі крізь EMA50", group=gS)
 sStop     =input.float(1.25,"Шорт: стоп (×ATR)", step=0.25, group=gS)
 sTrail    =input.float(5.0,"Шорт: трейл (×ATR)", step=0.5, group=gS)
 
-gA="ATR / фон"
+gX="Тейк / вихід"
+takeRR    =input.float(3.0,"Тейк (× ризику, RR)", step=0.5, group=gX)
+useFixedTake=input.bool(false,"Виходити по тейку (інакше — трейлінг)", group=gX)
+
+gA="ATR / вигляд"
 atrLen=input.int(14,"ATR Length", group=gA)
 showZone=input.bool(true,"Підсвічувати режим", group=gA)
 
-// ---------------- ІНДИКАТОРИ ----------------
 emaFast=ta.ema(close,emaFastLen)
 emaSlow=ta.ema(close,emaSlowLen)
 emaMid =ta.ema(close,emaMidLen)
@@ -53,26 +44,23 @@ atrVal =ta.atr(atrLen)
 rsi14  =ta.rsi(close,14)
 rsi2   =ta.rsi(close,2)
 bbUpper=ta.sma(close,bbLen)+bbMult*ta.stdev(close,bbLen)
-// WaveTrend (VuManChu)
 esa=ta.ema(hlc3,9)
 de =ta.ema(math.abs(hlc3-esa),9)
 ci =(hlc3-esa)/(0.015*de)
 wt1=ta.ema(ci,12)
 wt2=ta.sma(wt1,3)
 
-// ---------------- РЕЖИМИ ----------------
 bullRegime = close > emaSlow
 bearRegime = emaFast < emaSlow and close < emaSlow
 
-// ---------------- ТРИГЕРИ ----------------
 longSig  = (useBB and ta.crossover(close, bbUpper)) or (useVMC and ta.crossover(wt1, wt2) and wt2 <= -53) or (useRSI2 and ta.crossunder(rsi2, 10))
 shortSig = (useRipRSI and ta.crossover(rsi14, rsiTrig)) or (useRej100 and high >= emaMid and close < emaMid) or (useCross50 and ta.crossover(close, emaFast))
 
-// ---------------- СТАН (один лонг АБО шорт) ----------------
 var int   pos       = 0
 var float entryPx   = na
 var float stopLevel = na
-var float ext       = na   // peak (лонг) / trough (шорт)
+var float takeLevel = na
+var float ext       = na
 
 enterLong  = pos==0 and bullRegime and longSig and atrVal>0
 enterShort = pos==0 and bearRegime and shortSig and atrVal>0
@@ -81,11 +69,13 @@ if enterLong
     pos := 1
     entryPx := close
     stopLevel := close - lStop*atrVal
+    takeLevel := close + takeRR*(lStop*atrVal)
     ext := high
 else if enterShort
     pos := -1
     entryPx := close
     stopLevel := close + sStop*atrVal
+    takeLevel := close - takeRR*(sStop*atrVal)
     ext := low
 
 exitLong  = false
@@ -98,6 +88,10 @@ if pos==1 and not enterLong
         exitLong := true
         exitPx := stopLevel
         pos := 0
+    else if useFixedTake and high >= takeLevel
+        exitLong := true
+        exitPx := takeLevel
+        pos := 0
 else if pos==-1 and not enterShort
     ext := math.min(ext, low)
     stopLevel := math.min(stopLevel, ext + sTrail*atrVal)
@@ -105,28 +99,35 @@ else if pos==-1 and not enterShort
         exitShort := true
         exitPx := stopLevel
         pos := 0
+    else if useFixedTake and low <= takeLevel
+        exitShort := true
+        exitPx := takeLevel
+        pos := 0
 
-// ---------------- ВІДОБРАЖЕННЯ ----------------
+// ---- EMA та фон ----
 plot(emaFast, "EMA50",  color=color.new(color.orange,0))
 plot(emaMid,  "EMA100", color=color.new(#2196f3,0))
 plot(emaSlow, "EMA200", color=color.new(color.gray,0), linewidth=2)
-
 bgcolor(showZone and bullRegime ? color.new(color.green,93) : showZone and bearRegime ? color.new(color.red,92) : na, title="Режим")
 
-plot(pos!=0 ? stopLevel : na, "Стоп/Трейл", color = pos==1 ? color.new(color.lime,0) : color.new(color.fuchsia,0), style=plot.style_linebr, linewidth=2)
+// ---- ЛІНІЇ: ТВХ / СТОП / ТЕЙК (поки у позиції) ----
+plot(pos!=0 ? entryPx   : na, "ТВХ (вхід)", color=color.new(color.white,0),   style=plot.style_linebr, linewidth=2)
+plot(pos!=0 ? stopLevel : na, "СТОП",       color=color.new(color.red,0),     style=plot.style_linebr, linewidth=2)
+plot(pos!=0 ? takeLevel : na, "ТЕЙК",       color=color.new(color.aqua,0),    style=plot.style_linebr, linewidth=2)
 
-plotshape(enterLong,  title="LONG вхід",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime,0), size=size.small, text="LONG")
-plotshape(enterShort, title="SHORT вхід", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0),  size=size.small, text="SHORT")
-plotshape(exitLong or exitShort, title="EXIT", style=shape.xcross, location=location.absolute, color=color.new(color.yellow,0), size=size.tiny)
+// ---- Стрілки + великі підписи ----
+plotshape(enterLong,  title="LONG вхід",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime,0), size=size.large, text="LONG")
+plotshape(enterShort, title="SHORT вхід", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0),  size=size.large, text="SHORT")
+plotshape(exitLong or exitShort, title="EXIT", style=shape.xcross, location=location.absolute, color=color.new(color.yellow,0), size=size.small)
 
 if enterLong
-    label.new(bar_index, low, "LONG @ "+str.tostring(close,format.mintick), yloc=yloc.belowbar, color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+    label.new(bar_index, low,  "LONG @ "+str.tostring(close,format.mintick)+"\nстоп "+str.tostring(stopLevel,format.mintick)+" | тейк "+str.tostring(takeLevel,format.mintick), yloc=yloc.belowbar, color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.large)
 if enterShort
-    label.new(bar_index, high, "SHORT @ "+str.tostring(close,format.mintick), yloc=yloc.abovebar, color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+    label.new(bar_index, high, "SHORT @ "+str.tostring(close,format.mintick)+"\nстоп "+str.tostring(stopLevel,format.mintick)+" | тейк "+str.tostring(takeLevel,format.mintick), yloc=yloc.abovebar, color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.large)
 if exitLong or exitShort
-    label.new(bar_index, exitLong ? high : low, "EXIT @ "+str.tostring(exitPx,format.mintick), yloc=exitLong?yloc.abovebar:yloc.belowbar, color=color.new(color.gray,0), textcolor=color.white, style=exitLong?label.style_label_down:label.style_label_up, size=size.tiny)
+    label.new(bar_index, exitLong ? high : low, "EXIT @ "+str.tostring(exitPx,format.mintick), yloc=exitLong?yloc.abovebar:yloc.belowbar, color=color.new(color.gray,0), textcolor=color.white, style=exitLong?label.style_label_down:label.style_label_up, size=size.normal)
 
-// ---------------- АЛЕРТИ ----------------
+// ---- Алерти ----
 alertcondition(enterLong,  title="LONG вхід",  message="RegimeSys: ВІДКРИТИ ЛОНГ {{ticker}} @ {{close}}")
 alertcondition(enterShort, title="SHORT вхід", message="RegimeSys: ВІДКРИТИ ШОРТ {{ticker}} @ {{close}}")
 alertcondition(exitLong,   title="LONG вихід", message="RegimeSys: ЗАКРИТИ ЛОНГ {{ticker}} @ {{close}}")
