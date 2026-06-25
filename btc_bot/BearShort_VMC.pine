@@ -1,0 +1,111 @@
+//@version=5
+// ============================================================================
+//  BTC BEAR SHORT — "Продай ралі" (RSI/EMA rip short)
+//  Призначення: шорт у ВЕДМЕЖОМУ тренді (ціна під EMA200, EMA50<EMA200).
+//  Логіка: входимо в шорт на вершині релиф-ралі (відскоку), а не на пробої.
+//  Рекомендований таймфрейм: 4H (на ньому відкалібровано й протестовано).
+//
+//  Бектест-профіль (тільки ведмежі ринки BTC 2017-2026):
+//    expR ~0.58, RR ~3:1, частота ~1.3 угоди/тиждень під час даунтренду.
+//    У бичому ринку (ціна над EMA200) індикатор МОВЧИТЬ — це нормально.
+//
+//  Сигнали:
+//    ▼ SHORT — відкрити шорт (один із 3 тригерів спрацював у дауні)
+//    ▲ EXIT  — закрити шорт (ціну вибило трейлінг-стопом)
+//  Рожева лінія — поточний стоп (повзе вниз за ціною).
+//  Червоний фон — даунтренд активний (шорти "озброєні").
+// ============================================================================
+
+indicator("BTC Bear Short — RSI/EMA Rip", shorttitle="BearShort", overlay=true, max_labels_count=500)
+
+// ---------------- INPUTS ----------------
+grpT = "Фільтр тренду"
+emaFastLen = input.int(50,  "EMA Fast (тренд)",  group=grpT)
+emaSlowLen = input.int(200, "EMA Slow (тренд)",  group=grpT)
+
+grpE = "Входи (тригери шорта)"
+useRSI     = input.bool(true, "Вхід: RSI rip (RSI перетинає рівень вгору)", group=grpE)
+rsiLen     = input.int(14, "RSI Length", group=grpE)
+rsiTrig    = input.int(60, "RSI rip рівень", group=grpE)
+useRej100  = input.bool(true, "Вхід: відбій від EMA100 (тест зверху, закриття нижче)", group=grpE)
+emaMidLen  = input.int(100, "EMA Mid (відбій)", group=grpE)
+useCross50 = input.bool(true, "Вхід: ралі крізь EMA50 (close перетинає EMA50 вгору)", group=grpE)
+
+grpR = "Ризик / стоп"
+atrLen    = input.int(14,   "ATR Length", group=grpR)
+stopMult  = input.float(1.25,"Початковий стоп (×ATR)", step=0.25, group=grpR)
+trailMult = input.float(5.0, "Трейлінг-стоп (×ATR)",   step=0.5,  group=grpR)
+
+grpV = "Відображення"
+showEMAs = input.bool(true, "Показувати EMA 50/100/200", group=grpV)
+showZone = input.bool(true, "Підсвічувати даун-зону",     group=grpV)
+
+// ---------------- ІНДИКАТОРИ ----------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaMid  = ta.ema(close, emaMidLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+
+// ---------------- ФІЛЬТР ТРЕНДУ (даунтренд) ----------------
+downtrend = emaFast < emaSlow and close < emaSlow
+
+// ---------------- ТРИГЕРИ ШОРТА ----------------
+sigRSI    = useRSI    and ta.crossover(rsiVal, rsiTrig)        // RSI вистрілив у перекупленість відскоку
+sigRej100 = useRej100 and (high >= emaMid) and (close < emaMid) // тест EMA100 зверху і відбій
+sigCross50= useCross50 and ta.crossover(close, emaFast)         // ралі крізь EMA50
+rawSignal = downtrend and (sigRSI or sigRej100 or sigCross50)
+
+// ---------------- СТАН ПОЗИЦІЇ (один шорт за раз) ----------------
+var bool   inShort   = false
+var float  entryPx   = na
+var float  stopLevel = na
+var float  trailLow  = na
+
+enterShort = (not inShort) and rawSignal
+
+// вхід
+if enterShort
+    inShort   := true
+    entryPx   := close
+    stopLevel := close + stopMult * atrVal
+    trailLow  := low
+
+// супровід + вихід (починаючи з НАСТУПНОГО бару після входу)
+exitShort = false
+exitPx    = float(na)
+if inShort and not enterShort
+    trailLow  := math.min(trailLow, low)
+    stopLevel := math.min(stopLevel, trailLow + trailMult * atrVal)
+    if high >= stopLevel
+        exitShort := true
+        exitPx    := stopLevel
+        inShort   := false
+
+// причина входу (для підпису)
+entryReason = sigRSI ? "RSI>" + str.tostring(rsiTrig) : sigRej100 ? "відбій EMA" + str.tostring(emaMidLen) : "крос EMA" + str.tostring(emaFastLen)
+
+// ---------------- ВІДОБРАЖЕННЯ ----------------
+plot(showEMAs ? emaFast : na, "EMA50",  color=color.new(color.orange, 0))
+plot(showEMAs ? emaMid  : na, "EMA100", color=color.new(#2196f3, 0))
+plot(showEMAs ? emaSlow : na, "EMA200", color=color.new(color.red, 0), linewidth=2)
+
+bgcolor(showZone and downtrend ? color.new(color.red, 92) : na, title="Даун-зона")
+
+// лінія стопу (тільки поки в позиції)
+plot(inShort ? stopLevel : na, "Стоп/Трейл", color=color.new(color.fuchsia, 0), style=plot.style_linebr, linewidth=2)
+
+// стрілки входу/виходу
+plotshape(enterShort, title="SHORT вхід", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SHORT")
+plotshape(exitShort,  title="EXIT вихід", style=shape.triangleup,  location=location.belowbar, color=color.new(color.lime, 0), size=size.small, text="EXIT")
+
+// підписи з ціною/причиною
+if enterShort
+    label.new(bar_index, high, "SHORT @ " + str.tostring(close, format.mintick) + "\n(" + entryReason + ")  стоп " + str.tostring(close + stopMult * atrVal, format.mintick), yloc=yloc.abovebar, color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+if exitShort
+    label.new(bar_index, low, "EXIT @ " + str.tostring(exitPx, format.mintick), yloc=yloc.belowbar, color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// ---------------- АЛЕРТИ ----------------
+alertcondition(enterShort, title="SHORT вхід", message="BearShort: ВІДКРИТИ ШОРТ {{ticker}} @ {{close}} (даунтренд, ралі-вершина)")
+alertcondition(exitShort,  title="SHORT вихід", message="BearShort: ЗАКРИТИ ШОРТ {{ticker}} @ {{close}} (трейлінг-стоп)")
+alertcondition(enterShort or exitShort, title="Будь-який сигнал", message="BearShort: сигнал на {{ticker}} @ {{close}}")
