@@ -29,8 +29,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-TF_MS = {"15m": 900_000, "30m": 1_800_000, "1h": 3_600_000,
-         "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000}
+# підтримувані таймфрейми стрімів конфігурації D
+SUPPORTED_TF = {"30m", "1h", "2h", "4h", "1d"}
 
 
 def make_exchange():
@@ -86,13 +86,18 @@ def open_position(ex, strat, signal, equity, state):
     df = fetch_df(ex, strat.timeframe, 3)
     entry = float(df["close"].iloc[-1])
     side = signal["side"]
-    stop = entry * (1 - signal["stop_pct"]) if side == "long" else entry * (1 + signal["stop_pct"])
-    risk_pct = config.RISK_PER_TRADE[strat.name]
-    qty = round(position_size(equity, risk_pct, entry, stop), 3)
+    stop = float(signal["stop_price"])      # абсолютна ціна стопу зі стратегії
+    if getattr(strat, "sizing_mode", "risk") == "notional":
+        # частка номіналу * плече (для календаря)
+        notional = equity * strat.notional_mult * config.LEVERAGE
+        qty = round(notional / entry, 3)
+    else:
+        risk_pct = config.RISK_PER_TRADE[strat.name]
+        qty = round(position_size(equity, risk_pct, entry, stop), 3)
     if qty <= 0:
         log.warning(f"[{strat.name}] qty=0, пропускаю")
         return
-    log.info(f"[{strat.name}] ВХІД {side} qty={qty} @~{entry:.1f} stop={stop:.1f} risk={risk_pct*100:.1f}%")
+    log.info(f"[{strat.name}] ВХІД {side} qty={qty} @~{entry:.1f} stop={stop:.1f}")
     if not config.DRY_RUN:
         order_side = "buy" if side == "long" else "sell"
         ex.create_order(config.SYMBOL, "market", order_side, qty)
