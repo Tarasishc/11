@@ -54,6 +54,27 @@ if __name__=='__main__':
                 print('%-9s ema%3d p%.1f tp%.1f | n=%3d win=%.2f IS=%+.2f OOS=%+.2f | %+4.2f%%/mo DD=%2.0f%% плюс=%.0f%%(%d) %.1f/тиж'%(
                     combo,te,part,tp1,len(allt),(Rs>0).mean(),isR,oR,pm*100,dd*100,posm*100,nmo,len(allt)/(nmo*4.345)))
 
+    print('\n=== СВІП РИЗИКУ на найкращому (bos ema200 long-only p0.5 tp1.5) ===')
+    base=[]
+    for df in specs:
+        L,Sx=filt_signals(df,3,200,'bos')
+        base+=P.run_partial(df,L,np.zeros(len(df),bool),2.0,6.0,0.5,1.5)
+    base=sorted(base,key=lambda x:x[0])
+    for risk in [0.02,0.03,0.04,0.05,0.07,0.10]:
+        pm,dd,posm,nmo,_=M.posmonths(base,risk)
+        print('  risk=%2.0f%% | %+6.2f%%/mo DD=%2.0f%% плюс.міс=%.0f%%'%(risk*100,pm*100,dd*100,posm*100))
+
+    print('\n=== агресивніший exit: менший partial / триваліший трейл (risk2%) ===')
+    for part,tp1,sm,tm in [(0.5,1.5,2.0,6.0),(0.3,1.5,2.0,8.0),(0.3,2.0,2.0,8.0),(0.0,0.0,2.0,8.0),(0.0,0.0,2.5,10.0)]:
+        allt=[]
+        for df in specs:
+            L,Sx=filt_signals(df,3,200,'bos')
+            allt+=P.run_partial(df,L,np.zeros(len(df),bool),sm,tm,part,tp1)
+        Rs=np.array([r for _,r in allt])
+        pm,dd,posm,nmo,_=M.posmonths(allt,0.02)
+        print('  part%.1f tp%.1f sm%.1f tm%.1f | n=%3d win=%.2f | %+5.2f%%/mo DD=%2.0f%% плюс.міс=%.0f%%'%(
+            part,tp1,sm,tm,len(allt),(Rs>0).mean(),pm*100,dd*100,posm*100))
+
     print('\n=== свіп part/tp (long+short та long-only) ===')
     for lo in [False,True]:
         for part,tp1 in [(0.4,1.0),(0.5,1.0),(0.5,1.5),(0.6,1.5)]:
