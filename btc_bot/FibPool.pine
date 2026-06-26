@@ -120,9 +120,9 @@ plot(pos!=0 ? entryPx : na, "ТВХ",  color=color.new(color.white,0), style=plo
 plot(pos!=0 ? stopLvl : na, "СТОП", color=color.new(color.red,0),   style=plot.style_linebr, linewidth=2)
 plot(pos!=0 ? takeLvl : na, "ТЕЙК", color=color.new(color.aqua,0),  style=plot.style_linebr, linewidth=2)
 
-// рівень фіби 0.886 для поточного режиму (де чекаємо вхід)
-fibActive = bull ? lvlLong : bear ? lvlShort : na
-plot(rng>0 ? fibActive : na, "Рівень фіби 0.886", color=color.new(color.orange,0), style=plot.style_circles, linewidth=1)
+// рівень фіби 0.886 для поточного режиму (де чекаємо вхід) — яскрава товста лінія
+fibActive = rng>0 ? (bull ? lvlLong : lvlShort) : na
+plot(fibActive, "Рівень фіби 0.886", color=color.new(color.yellow,0), style=plot.style_stepline, linewidth=3)
 
 plotshape(enterLong,  title="LONG",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime,0), size=size.tiny, text="LONG")
 plotshape(enterShort, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0),  size=size.tiny, text="SHORT")
