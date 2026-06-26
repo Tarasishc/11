@@ -56,8 +56,9 @@ isH1  = tfMin <= 60
 rrLong  = autoRR ? (isH1 ? 3.0 : 2.0) : rrLongI
 rrShort = autoRR ? (isH1 ? 2.0 : 1.5) : rrShortI
 
-// фільтри
-volOK = not useVol or volume >= volMult * volSma
+// фільтри (volOK авто-вимикається на символах без обсягу, напр. ...CRYPTO-індекс)
+hasVol = not na(volSma) and volSma > 0
+volOK = not useVol or not hasVol or volume >= volMult * volSma
 adxOK = not useADX or adxVal >= adxMin
 
 bull = close > ema
