@@ -10,3 +10,4 @@ uploads/pdfs/*.pdf
 # quant research
 quant/.venv/
 quant/__pycache__/
+quant/search/
