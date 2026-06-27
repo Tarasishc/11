@@ -46,6 +46,41 @@ def load_eth_1d(path: str = "quant/data/eth_1d.csv") -> pd.DataFrame:
     return _load_semicolon(path)
 
 
+def load_any(path: str) -> pd.DataFrame:
+    """Універсальний лоадер OHLCV: автовизначення роздільника, формату часу,
+    назв стовпців. Повертає UTC-індекс + [open,high,low,close,vol]."""
+    with open(path, "r", encoding="utf-8-sig") as f:
+        head = f.readline()
+    sep = ";" if head.count(";") > head.count(",") else ","
+    df = pd.read_csv(path, sep=sep, encoding="utf-8-sig")
+    df.columns = [str(c).strip().lower().lstrip("﻿") for c in df.columns]
+    # знайти часовий стовпець
+    tcol = next((c for c in df.columns if c in ("time", "ts", "timestamp", "date", "datetime", "open_time")), df.columns[0])
+    ren = {}
+    for c in df.columns:
+        if c in ("o", "open"): ren[c] = "open"
+        elif c in ("h", "high"): ren[c] = "high"
+        elif c in ("l", "low"): ren[c] = "low"
+        elif c in ("c", "close", "price"): ren[c] = "close"
+        elif c in ("v", "vol", "volume", "volume usdt", "volume btc"): ren[c] = "vol"
+    df = df.rename(columns=ren)
+    # парсинг часу: ms-epoch (велике число) чи рядок-дата
+    tser = df[tcol]
+    if pd.api.types.is_numeric_dtype(tser) or str(tser.iloc[0]).strip().strip('"').isdigit():
+        v = pd.to_numeric(tser, errors="coerce")
+        unit = "ms" if v.iloc[0] > 1e11 else "s"
+        df["dt"] = pd.to_datetime(v, unit=unit, utc=True)
+    else:
+        df["dt"] = pd.to_datetime(tser.astype(str).str.strip('"'), utc=True)
+    if "vol" not in df.columns:
+        df["vol"] = 0.0
+    df = df[["dt", "open", "high", "low", "close", "vol"]].set_index("dt").sort_index()
+    df = df[~df.index.duplicated(keep="first")]
+    for c in ["open", "high", "low", "close", "vol"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.dropna(subset=["open", "high", "low", "close"])
+
+
 def expected_step(df: pd.DataFrame) -> pd.Timedelta:
     """Медіанний крок між барами."""
     return df.index.to_series().diff().median()
