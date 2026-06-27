@@ -40,6 +40,16 @@ def to_4h(df):
 
 def signals(d, kind="donchian", bmin=240):
     adx, pdi, mdi = _adx_di(d, 14)
+    if kind == "kc":
+        # Keltner breakout + EMA200 (знахідка агента A, генералізується між монетами)
+        mid = E.ema(d["close"], 20)
+        band = 2.0 * E.atr(d, 10)
+        upper = mid + band; lower = mid - band
+        trend = E.ema(d["close"], 200)
+        long = (d["close"] > upper) & (d["close"] > trend)
+        short = (d["close"] < lower) & (d["close"] < trend)
+        side = np.zeros(len(d)); side[long.to_numpy()] = 1; side[short.to_numpy()] = -1
+        return side, (E.atr(d, 14) * 2.0).to_numpy()
     if kind == "donchian":
         dh = E.donchian_high(d, 80).shift(1); dl = E.donchian_low(d, 80).shift(1)
         up = (adx > 25) & (pdi > mdi); dn = (adx > 25) & (mdi > pdi)
