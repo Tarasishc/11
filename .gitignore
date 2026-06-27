@@ -11,3 +11,7 @@ uploads/pdfs/*.pdf
 quant/.venv/
 quant/__pycache__/
 quant/search/
+quant/out/A_*
+quant/out/B_*
+quant/out/C_*
+quant/out/*.pkl
