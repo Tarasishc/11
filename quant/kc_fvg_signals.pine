@@ -37,6 +37,7 @@ showZones= input.bool(false,"Малювати зони FVG (імбаланс)",g
 grpR = "RR-бокс (як інструмент Long/Short Position)"
 boxBars = input.int(24, "Ширина боксу (барів вправо)", group=grpR)
 showLbl = input.bool(true, "Підпис із цінами на боксі", group=grpR)
+showWait= input.bool(true, "Підпис WAIT на поточній свічці", group=grpR)
 
 // малює готову позицію: зелена зона профіту + червона зона ризику + лінія входу
 f_drawRR(isLong, e, s, t) =>
@@ -173,3 +174,11 @@ if barstate.islast
     table.cell(tb, 1, 1, close > trend ? "так (лонги)" : "ні (шорти)", text_color=color.white, bgcolor = close > trend ? color.green : color.red)
     table.cell(tb, 0, 2, "активних FVG", text_color=color.white, bgcolor=color.gray)
     table.cell(tb, 1, 2, str.tostring(array.size(bZt) + array.size(sZt)), text_color=color.white, bgcolor=color.gray)
+
+// ----------------------------- Нагадування «не заходь раніше» ---------------
+// показуємо ⏳ WAIT над поточною свічкою, поки вона НЕ закрилась; зникає на закритті
+var label wlab = na
+if showWait and barstate.islast
+    label.delete(wlab)
+    if not barstate.isconfirmed
+        wlab := label.new(bar_index, high, "⏳ WAIT\nсвічка не закрита", style=label.style_label_down, color=color.new(color.orange, 15), textcolor=color.white, size=size.small)
