@@ -35,22 +35,36 @@ showFVG  = input.bool(true, "Сигнали FVG",      group=grpG)
 showZones= input.bool(false,"Малювати зони FVG (імбаланс)",group=grpG)
 
 grpR = "RR-бокс (як інструмент Long/Short Position)"
-boxBars = input.int(24, "Ширина боксу (барів вправо)", group=grpR)
+boxBars = input.int(10, "Ширина боксу (барів вправо)", group=grpR)
+maxBoxes= input.int(3,  "Показувати боксом лише N останніх сигналів", minval=1, group=grpR)
 showLbl = input.bool(true, "Підпис із цінами на боксі", group=grpR)
 showWait= input.bool(true, "Підпис WAIT на поточній свічці", group=grpR)
+markAll = input.bool(true, "Трикутники-маркери для ВСІХ сигналів", group=grpR)
+
+// сховища намальованих об'єктів, щоб лишати лише N останніх боксів (решта — захаращують)
+var allBoxes  = array.new_box()
+var allLines  = array.new_line()
+var allLabels = array.new_label()
 
 // малює готову позицію: зелена зона профіту + червона зона ризику + лінія входу
 f_drawRR(isLong, e, s, t) =>
     l = bar_index
     r = bar_index + boxBars
-    box.new(l, math.max(e, t), r, math.min(e, t), border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 80))
-    box.new(l, math.max(e, s), r, math.min(e, s), border_color=color.new(color.red, 50),   bgcolor=color.new(color.red, 80))
-    line.new(l, e, r, e, color=color.new(color.blue, 0), width=1)
+    array.push(allBoxes, box.new(l, math.max(e, t), r, math.min(e, t), border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 80)))
+    array.push(allBoxes, box.new(l, math.max(e, s), r, math.min(e, s), border_color=color.new(color.red, 50),   bgcolor=color.new(color.red, 80)))
+    array.push(allLines, line.new(l, e, r, e, color=color.new(color.blue, 0), width=1))
     if showLbl
         pT = math.abs((t - e) / e * 100)
         pS = math.abs((s - e) / e * 100)
         txt = (isLong ? "LONG  " : "SHORT  ") + str.tostring(e, format.mintick) + "\n🎯 " + str.tostring(t, format.mintick) + " (" + str.tostring(pT, "#.#") + "%)\n🛑 " + str.tostring(s, format.mintick) + " (" + str.tostring(pS, "#.#") + "%)\nRR 1:" + str.tostring(rr, "#.#")
-        label.new(r, e, txt, style=label.style_label_left, color=color.new(isLong ? color.green : color.red, 20), textcolor=color.white, size=size.small)
+        array.push(allLabels, label.new(r, e, txt, style=label.style_label_left, color=color.new(isLong ? color.green : color.red, 20), textcolor=color.white, size=size.small))
+    // лишаємо лише N останніх сигналів (2 бокси на сигнал), решту видаляємо
+    while array.size(allBoxes) > maxBoxes * 2
+        box.delete(array.shift(allBoxes))
+    while array.size(allLines) > maxBoxes
+        line.delete(array.shift(allLines))
+    while array.size(allLabels) > maxBoxes
+        label.delete(array.shift(allLabels))
 
 // ----------------------------- Індикатори -----------------------------------
 trend = ta.ema(close, trendLen)
@@ -164,6 +178,12 @@ if fvgLong
 if fvgShort
     f_drawRR(false, seZt, seSt, seTg)
     alert("🟥 FVG SHORT " + syminfo.ticker + " | лімітка " + str.tostring(seZt, format.mintick) + " | стоп " + str.tostring(seSt, format.mintick) + " | тейк " + str.tostring(seTg, format.mintick), alert.freq_once_per_bar_close)
+
+// маленькі маркери на КОЖНОМУ сигналі (історія видна, але без захаращення боксами)
+plotshape(markAll and showKC and kcLongFresh  and barstate.isconfirmed, "KC long",  shape.triangleup,   location.belowbar, color.new(color.green, 0),   size=size.tiny)
+plotshape(markAll and showKC and kcShortFresh and barstate.isconfirmed, "KC short", shape.triangledown, location.abovebar, color.new(color.red, 0),     size=size.tiny)
+plotshape(markAll and fvgLong,  "FVG long",  shape.triangleup,   location.belowbar, color.new(color.lime, 0),    size=size.tiny)
+plotshape(markAll and fvgShort, "FVG short", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
 
 // ----------------------------- Табличка стану -------------------------------
 var table tb = table.new(position.top_right, 2, 3, border_width=1)
