@@ -7,6 +7,8 @@
 //  ta.ema / ta.atr (RMA) / ta.dmi — Wilder-згладжування, збігається з python-движком.
 //  NON-REPAINT: сигнали/бокси малюються лише на ЗАКРИТІЙ свічці (barstate.isconfirmed),
 //  тому НЕ зникають після появи. Заходити — на закритті 4h-бара (= коли прийшов алерт).
+//  "Одна угода за раз на двигун" (як у бектесті): новий KC/FVG-сигнал не з'явиться,
+//  поки відкритий по тому ж двигуну не вийде в стоп/тейк (макс 1 KC + 1 FVG на монету).
 //  Алерти: створи Alert -> "Any alert() function call" -> "Once Per Bar Close".
 // ============================================================================
 indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
@@ -33,6 +35,7 @@ rr       = input.float(2.0,"Risk : Reward",   group=grpG)
 showKC   = input.bool(true, "Сигнали KC",       group=grpG)
 showFVG  = input.bool(true, "Сигнали FVG",      group=grpG)
 showZones= input.bool(false,"Малювати зони FVG (імбаланс)",group=grpG)
+oneAtTime= input.bool(true, "Одна угода за раз на двигун (як у тестах)",group=grpG)
 
 grpR = "RR-бокс (як інструмент Long/Short Position)"
 boxBars = input.int(10, "Ширина боксу (барів вправо)", group=grpR)
@@ -87,19 +90,41 @@ kcShort = showKC and not na(trend) and not na(adxv) and close < lower and close 
 kcLongFresh  = kcLong  and not kcLong[1]
 kcShortFresh = kcShort and not kcShort[1]
 
-if kcLongFresh and barstate.isconfirmed
+// стан відкритої KC-позиції (режим "одна угода за раз")
+var bool  kcIn    = false
+var bool  kcLongP = false
+var float kcS = na
+var float kcT = na
+if barstate.isconfirmed and kcIn
+    hitS = kcLongP ? low <= kcS : high >= kcS
+    hitT = kcLongP ? high >= kcT : low <= kcT
+    if hitS or hitT
+        kcIn := false
+
+kcLongFire  = kcLongFresh  and barstate.isconfirmed and (not oneAtTime or not kcIn)
+kcShortFire = kcShortFresh and barstate.isconfirmed and (not oneAtTime or not kcIn)
+
+if kcLongFire
     D = kcStopX * atr14
     e = close
     s = close - D
     t = close + rr * D
     f_drawRR(true, e, s, t)
+    kcIn := true
+    kcLongP := true
+    kcS := s
+    kcT := t
     alert("🟢 KC LONG " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
-if kcShortFresh and barstate.isconfirmed
+if kcShortFire
     D = kcStopX * atr14
     e = close
     s = close + D
     t = close - rr * D
     f_drawRR(false, e, s, t)
+    kcIn := true
+    kcLongP := false
+    kcS := s
+    kcT := t
     alert("🔴 KC SHORT " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
 
 // =================== ДВИГУН 2: FVG RETEST (лімітка) =========================
@@ -119,6 +144,17 @@ float leTg = na
 float seZt = na
 float seSt = na
 float seTg = na
+
+// стан відкритої FVG-позиції (режим "одна угода за раз")
+var bool  fvgIn    = false
+var bool  fvgLongP = false
+var float fvgS = na
+var float fvgT = na
+if barstate.isconfirmed and fvgIn
+    hS = fvgLongP ? low <= fvgS : high >= fvgS
+    hT = fvgLongP ? high >= fvgT : low <= fvgT
+    if hS or hT
+        fvgIn := false
 
 if showFVG and barstate.isconfirmed
     // --- 1) спершу ретест наявних зон (тому сигнал не спрацює на барі формування) ---
@@ -172,21 +208,32 @@ if showFVG and barstate.isconfirmed
         if showZones
             box.new(bar_index, low[2], bar_index + fvgLook, high, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88))
 
-if fvgLong
+fvgLongFire  = fvgLong  and (not oneAtTime or not fvgIn)
+fvgShortFire = fvgShort and (not oneAtTime or not fvgIn)
+
+if fvgLongFire
     f_drawRR(true, leZt, leSt, leTg)
+    fvgIn := true
+    fvgLongP := true
+    fvgS := leSt
+    fvgT := leTg
     alert("🟩 FVG LONG " + syminfo.ticker + " | лімітка " + str.tostring(leZt, format.mintick) + " | стоп " + str.tostring(leSt, format.mintick) + " | тейк " + str.tostring(leTg, format.mintick), alert.freq_once_per_bar_close)
-if fvgShort
+if fvgShortFire
     f_drawRR(false, seZt, seSt, seTg)
+    fvgIn := true
+    fvgLongP := false
+    fvgS := seSt
+    fvgT := seTg
     alert("🟥 FVG SHORT " + syminfo.ticker + " | лімітка " + str.tostring(seZt, format.mintick) + " | стоп " + str.tostring(seSt, format.mintick) + " | тейк " + str.tostring(seTg, format.mintick), alert.freq_once_per_bar_close)
 
-// маленькі маркери на КОЖНОМУ сигналі (історія видна, але без захаращення боксами)
-plotshape(markAll and showKC and kcLongFresh  and barstate.isconfirmed, "KC long",  shape.triangleup,   location.belowbar, color.new(color.green, 0),   size=size.tiny)
-plotshape(markAll and showKC and kcShortFresh and barstate.isconfirmed, "KC short", shape.triangledown, location.abovebar, color.new(color.red, 0),     size=size.tiny)
-plotshape(markAll and fvgLong,  "FVG long",  shape.triangleup,   location.belowbar, color.new(color.lime, 0),    size=size.tiny)
-plotshape(markAll and fvgShort, "FVG short", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
+// маленькі маркери на КОЖНІЙ ВЗЯТІЙ угоді (історія видна, без захаращення боксами)
+plotshape(markAll and kcLongFire,  "KC long",  shape.triangleup,   location.belowbar, color.new(color.green, 0),   size=size.tiny)
+plotshape(markAll and kcShortFire, "KC short", shape.triangledown, location.abovebar, color.new(color.red, 0),     size=size.tiny)
+plotshape(markAll and fvgLongFire, "FVG long", shape.triangleup,   location.belowbar, color.new(color.lime, 0),    size=size.tiny)
+plotshape(markAll and fvgShortFire,"FVG short",shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
 
 // ----------------------------- Табличка стану -------------------------------
-var table tb = table.new(position.top_right, 2, 3, border_width=1)
+var table tb = table.new(position.top_right, 2, 4, border_width=1)
 if barstate.islast
     table.cell(tb, 0, 0, "ADX", text_color=color.white, bgcolor=color.gray)
     table.cell(tb, 1, 0, str.tostring(adxv, "#.#"), text_color=color.white, bgcolor = adxv >= adxMin ? color.green : color.red)
@@ -194,6 +241,10 @@ if barstate.islast
     table.cell(tb, 1, 1, close > trend ? "так (лонги)" : "ні (шорти)", text_color=color.white, bgcolor = close > trend ? color.green : color.red)
     table.cell(tb, 0, 2, "активних FVG", text_color=color.white, bgcolor=color.gray)
     table.cell(tb, 1, 2, str.tostring(array.size(bZt) + array.size(sZt)), text_color=color.white, bgcolor=color.gray)
+    posTxt = (kcIn ? "KC " : "") + (fvgIn ? "FVG" : "")
+    posTxt := posTxt == "" ? "вільно" : posTxt
+    table.cell(tb, 0, 3, "в угоді", text_color=color.white, bgcolor=color.gray)
+    table.cell(tb, 1, 3, posTxt, text_color=color.white, bgcolor = (kcIn or fvgIn) ? color.orange : color.green)
 
 // ----------------------------- Нагадування «не заходь раніше» ---------------
 // показуємо ⏳ WAIT над поточною свічкою, поки вона НЕ закрилась; зникає на закритті
