@@ -1137,7 +1137,8 @@ quant/
   32_streaks.py            серії плюс/мінус місяців + режими            — §20
   33_execution.py          способи входу (маркет/лімітка/запізнення)     — §21
   signal_bot.py            Python сигнальний бот -> Telegram             — §22
-  kc_breakout.pine         TradingView-індикатор (Pine v5)               — §22
+  kc_breakout.pine         TradingView-індикатор лише KC (Pine v5)       — §22
+  kc_fvg_signals.pine      TradingView-індикатор KC+FVG (робоча зв'язка) — §22
   35_borrowed_strategies.py 36_max_safe.py  3 надані стратегії + макс.безпека — §25/§26
   37_fvg_test.py 38_kc_fvg_safe.py 39_combined_concentration.py  FVG-едж — §27
   40_validation_battery.py  батарея незалежних перевірок KC+FVG          — §27

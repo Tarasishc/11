@@ -1,0 +1,156 @@
+//@version=5
+// ============================================================================
+//  KC + FVG — сигнальний індикатор для РУЧНОГО входу (BTC/ETH/SOL, таймфрейм 4h)
+//  Робоча зв'язка з дослідження (§13 + §27): два незалежні двигуни на одному графіку.
+//    1) KC breakout  — пробій каналу Кельтнера в бік тренду (маркет-вхід)
+//    2) FVG retest   — повернення ціни в 3-барний імбаланс у бік тренду (лімітка)
+//  ta.ema / ta.atr (RMA) / ta.dmi — Wilder-згладжування, збігається з python-движком.
+//  Алерти: створи Alert -> "Any alert() function call" -> "Once Per Bar Close".
+// ============================================================================
+indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ----------------------------- Параметри ------------------------------------
+grpT = "Тренд / фільтр"
+trendLen = input.int(200, "EMA тренду", group=grpT)
+adxLen   = input.int(14,  "ADX довжина", group=grpT)
+adxMin   = input.float(20, "ADX мінімум (тільки KC)", group=grpT)
+
+grpK = "Keltner breakout"
+kcEma    = input.int(20,   "KC: EMA середини", group=grpK)
+kcAtrLen = input.int(10,   "KC: ATR каналу",  group=grpK)
+kcMult   = input.float(2.0,"KC: множник ATR", group=grpK)
+
+grpF = "FVG retest"
+fvgLook  = input.int(20,   "FVG: вікно ретесту (барів)", group=grpF)
+fvgFloor = input.float(0.5,"FVG: мін. стоп у ATR(14)",   group=grpF)
+
+grpG = "Загальне"
+stopAtr  = input.int(14,   "ATR для стопу",   group=grpG)
+kcStopX  = input.float(2.0,"KC: стоп = ATR×", group=grpG)
+rr       = input.float(2.0,"Risk : Reward",   group=grpG)
+showKC   = input.bool(true, "Сигнали KC",       group=grpG)
+showFVG  = input.bool(true, "Сигнали FVG",      group=grpG)
+showZones= input.bool(true, "Малювати зони FVG",group=grpG)
+
+// ----------------------------- Індикатори -----------------------------------
+trend = ta.ema(close, trendLen)
+mid   = ta.ema(close, kcEma)
+band  = kcMult * ta.atr(kcAtrLen)
+upper = mid + band
+lower = mid - band
+[diP, diM, adxv] = ta.dmi(adxLen, adxLen)
+atr14 = ta.atr(stopAtr)
+
+plot(trend, "EMA200",   color=color.orange, linewidth=2)
+plot(upper, "KC верх",  color=color.new(color.teal, 50))
+plot(lower, "KC низ",   color=color.new(color.teal, 50))
+plot(mid,   "KC mid",   color=color.new(color.gray, 70))
+
+// =================== ДВИГУН 1: KC BREAKOUT (маркет) =========================
+kcLong  = showKC and not na(trend) and not na(adxv) and close > upper and close > trend and adxv >= adxMin
+kcShort = showKC and not na(trend) and not na(adxv) and close < lower and close < trend and adxv >= adxMin
+// лише СВІЖИЙ пробій (не спамити, поки ціна тримається за смугою)
+kcLongFresh  = kcLong  and not kcLong[1]
+kcShortFresh = kcShort and not kcShort[1]
+
+if kcLongFresh
+    D = kcStopX * atr14
+    e = close
+    s = close - D
+    t = close + rr * D
+    label.new(bar_index, low, "KC LONG\nвхід≈" + str.tostring(e, format.mintick) + "\nстоп " + str.tostring(s, format.mintick) + "\nціль " + str.tostring(t, format.mintick), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+    alert("🟢 KC LONG " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
+if kcShortFresh
+    D = kcStopX * atr14
+    e = close
+    s = close + D
+    t = close - rr * D
+    label.new(bar_index, high, "KC SHORT\nвхід≈" + str.tostring(e, format.mintick) + "\nстоп " + str.tostring(s, format.mintick) + "\nціль " + str.tostring(t, format.mintick), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+    alert("🔴 KC SHORT " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
+
+// =================== ДВИГУН 2: FVG RETEST (лімітка) =========================
+// активні зони зберігаємо в масивах: top(zt), bottom(zb), бар-дедлайн(expiry)
+var bZt = array.new_float()   // бичачі (long)
+var bZb = array.new_float()
+var bEx = array.new_int()
+var sZt = array.new_float()   // ведмежі (short)
+var sZb = array.new_float()
+var sEx = array.new_int()
+
+bool  fvgLong  = false
+bool  fvgShort = false
+float leZt = na
+float leSt = na
+float leTg = na
+float seZt = na
+float seSt = na
+float seTg = na
+
+if showFVG
+    // --- 1) спершу ретест наявних зон (тому сигнал не спрацює на барі формування) ---
+    i = 0
+    while i < array.size(bZt)
+        zt = array.get(bZt, i)
+        zb = array.get(bZb, i)
+        ex = array.get(bEx, i)
+        hit = low <= zt and not na(trend) and close > trend
+        if hit
+            D = math.max(zt - zb, fvgFloor * atr14)
+            leZt := zt
+            leSt := zt - D
+            leTg := zt + rr * D
+            fvgLong := true
+        if hit or bar_index > ex
+            array.remove(bZt, i)
+            array.remove(bZb, i)
+            array.remove(bEx, i)
+        else
+            i += 1
+    j = 0
+    while j < array.size(sZt)
+        zt = array.get(sZt, j)
+        zb = array.get(sZb, j)
+        ex = array.get(sEx, j)
+        hit = high >= zt and not na(trend) and close < trend
+        if hit
+            D = math.max(zb - zt, fvgFloor * atr14)
+            seZt := zt
+            seSt := zt + D
+            seTg := zt - rr * D
+            fvgShort := true
+        if hit or bar_index > ex
+            array.remove(sZt, j)
+            array.remove(sZb, j)
+            array.remove(sEx, j)
+        else
+            j += 1
+    // --- 2) виявлення нових FVG (3-барний імбаланс) у бік тренду ---
+    if not na(trend) and high[2] < low and close > trend          // бичачий розрив
+        array.push(bZt, low)
+        array.push(bZb, high[2])
+        array.push(bEx, bar_index + fvgLook)
+        if showZones
+            box.new(bar_index, low, bar_index + fvgLook, high[2], border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 88))
+    if not na(trend) and low[2] > high and close < trend          // ведмежий розрив
+        array.push(sZt, high)
+        array.push(sZb, low[2])
+        array.push(sEx, bar_index + fvgLook)
+        if showZones
+            box.new(bar_index, low[2], bar_index + fvgLook, high, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88))
+
+if fvgLong
+    label.new(bar_index, low, "FVG LONG\nлімітка " + str.tostring(leZt, format.mintick) + "\nстоп " + str.tostring(leSt, format.mintick) + "\nціль " + str.tostring(leTg, format.mintick), style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.small)
+    alert("🟩 FVG LONG " + syminfo.ticker + " | лімітка " + str.tostring(leZt, format.mintick) + " | стоп " + str.tostring(leSt, format.mintick) + " | тейк " + str.tostring(leTg, format.mintick), alert.freq_once_per_bar_close)
+if fvgShort
+    label.new(bar_index, high, "FVG SHORT\nлімітка " + str.tostring(seZt, format.mintick) + "\nстоп " + str.tostring(seSt, format.mintick) + "\nціль " + str.tostring(seTg, format.mintick), style=label.style_label_down, color=color.new(color.fuchsia, 0), textcolor=color.white, size=size.small)
+    alert("🟥 FVG SHORT " + syminfo.ticker + " | лімітка " + str.tostring(seZt, format.mintick) + " | стоп " + str.tostring(seSt, format.mintick) + " | тейк " + str.tostring(seTg, format.mintick), alert.freq_once_per_bar_close)
+
+// ----------------------------- Табличка стану -------------------------------
+var table tb = table.new(position.top_right, 2, 3, border_width=1)
+if barstate.islast
+    table.cell(tb, 0, 0, "ADX", text_color=color.white, bgcolor=color.gray)
+    table.cell(tb, 1, 0, str.tostring(adxv, "#.#"), text_color=color.white, bgcolor = adxv >= adxMin ? color.green : color.red)
+    table.cell(tb, 0, 1, "ціна > EMA200?", text_color=color.white, bgcolor=color.gray)
+    table.cell(tb, 1, 1, close > trend ? "так (лонги)" : "ні (шорти)", text_color=color.white, bgcolor = close > trend ? color.green : color.red)
+    table.cell(tb, 0, 2, "активних FVG", text_color=color.white, bgcolor=color.gray)
+    table.cell(tb, 1, 2, str.tostring(array.size(bZt) + array.size(sZt)), text_color=color.white, bgcolor=color.gray)
