@@ -8,6 +8,7 @@
     #   https://api.telegram.org/bot<TOKEN>/getUpdates -> "chat":{"id":...}
     python signal_bot.py            # робочий цикл (чекає 4h-закриття)
     python signal_bot.py once       # одна перевірка зараз
+    python signal_bot.py report     # надіслати денний звіт зараз
     python signal_bot.py selftest   # перевірка логіки на локальних CSV (без мережі)
 
 KC LONG : close>верх Keltner & close>EMA200 & ADX>20  (SHORT дзеркально)
@@ -37,6 +38,7 @@ ACCOUNT    = 1000.0
 RISK_PCT   = 0.01                    # 1% (≈7%/міс @ DD~36%); 1.5% для ~10%/міс
 LEV_CAP    = 5.0                     # нагадування: сумарна експозиція <= 5x депо
 SESSION_FILTER = False               # True = лише входи 00-12 UTC (опц., KC)
+DAILY_REPORT   = True                # денний звіт на 00:00 UTC-закритті
 STATE_FILE = "signal_bot_state.json"
 DRY_RUN    = False
 # ===================================================================
@@ -157,10 +159,36 @@ def run_once(ex, st):
                     key = f"{sym}:{eng}"; bid = sig["bar_time"].isoformat()
                     if st.get(key) != bid:
                         send_tg(fmt(sym, sig)); st[key] = bid; fired.append(f"{eng} {sig['side']}")
+                        st.setdefault("log", []).append(dict(t=datetime.now(timezone.utc).isoformat(),
+                            eng=eng, side=sig["side"], sym=sym.split("/")[0], px=round(sig["price"], 4)))
+                        st["log"] = st["log"][-300:]
             print(f"{datetime.now(timezone.utc):%H:%M} {sym}: {', '.join(fired) if fired else 'нема'}")
         except Exception as e:
             print(f"{sym} помилка: {e}")
     save_state(st)
+
+
+def daily_report(ex, st):
+    """Зведення за 24 год: сигнали + знімок ринку по монетах."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    recent = [e for e in st.get("log", []) if e["t"] >= cutoff]
+    lines = [f"📊 <b>Денний звіт</b> {datetime.now(timezone.utc):%Y-%m-%d}",
+             f"Сигналів за 24 год: <b>{len(recent)}</b>"]
+    for e in recent:
+        lines.append(f"  • {e['eng']} {e['side']} {e['sym']} @ {e['px']}")
+    lines.append("\n<b>Стан ринку:</b>")
+    for sym in SYMBOLS:
+        try:
+            df = fetch(ex, sym); c = df["close"]; px = c.iloc[-1]
+            ax = adx(df, 14).iloc[-1]; tr = ema(c, TREND_EMA).iloc[-1]
+            d = "↑ вгору" if px > tr else "↓ вниз"
+            mode = "тренд" if ax > ADX_MIN else "ФЛЕТ"
+            lines.append(f"  {sym.split('/')[0]}: {px:.2f} | {d} | ADX {ax:.0f} ({mode})")
+        except Exception as ee:
+            lines.append(f"  {sym.split('/')[0]}: помилка ({str(ee)[:30]})")
+    lines.append("\nБот живий ✅")
+    send_tg("\n".join(lines))
+    st["last_report"] = datetime.now(timezone.utc).strftime("%Y-%m-%d"); save_state(st)
 
 
 def next_4h_wakeup():
@@ -206,7 +234,11 @@ if __name__ == "__main__":
     import ccxt
     ex = getattr(ccxt, EXCHANGE)({"enableRateLimit": True}); st = load_state()
     if mode == "once": run_once(ex, st); sys.exit()
+    if mode == "report": daily_report(ex, st); sys.exit()
     send_tg(f"✅ Бот запущено. Двигуни: {', '.join(ENGINES)}. Стежу: {', '.join(SYMBOLS)} ({TIMEFRAME}).")
     while True:
         run_once(ex, st)
+        now = datetime.now(timezone.utc)
+        if DAILY_REPORT and now.hour < 4 and st.get("last_report") != now.strftime("%Y-%m-%d"):
+            daily_report(ex, st)
         slp = next_4h_wakeup(); print(f"Сплю {slp/60:.0f} хв до 4h-закриття..."); time.sleep(slp)
