@@ -7,8 +7,9 @@
 //  ta.ema / ta.atr (RMA) / ta.dmi — Wilder-згладжування, збігається з python-движком.
 //  NON-REPAINT: сигнали/бокси малюються лише на ЗАКРИТІЙ свічці (barstate.isconfirmed),
 //  тому НЕ зникають після появи. Заходити — на закритті 4h-бара (= коли прийшов алерт).
-//  "Одна угода за раз на двигун" (як у бектесті): новий KC/FVG-сигнал не з'явиться,
-//  поки відкритий по тому ж двигуну не вийде в стоп/тейк (макс 1 KC + 1 FVG на монету).
+//  "Одна угода за раз на двигун" (як у бектесті): макс 1 KC + 1 FVG на монету.
+//  "Одна позиція на монету" (реально руками: два шорти на біржі зливаються в одну):
+//  поки є позиція на цьому символі — нові сигнали не показуються. Через монети — ок.
 //  Алерти: створи Alert -> "Any alert() function call" -> "Once Per Bar Close".
 // ============================================================================
 indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
@@ -36,6 +37,7 @@ showKC   = input.bool(true, "Сигнали KC",       group=grpG)
 showFVG  = input.bool(true, "Сигнали FVG",      group=grpG)
 showZones= input.bool(false,"Малювати зони FVG (імбаланс)",group=grpG)
 oneAtTime= input.bool(true, "Одна угода за раз на двигун (як у тестах)",group=grpG)
+perCoin  = input.bool(true, "Одна позиція на МОНЕТУ (бо 2 шорти зливаються)",group=grpG)
 
 grpR = "RR-бокс (як інструмент Long/Short Position)"
 boxBars = input.int(10, "Ширина боксу (барів вправо)", group=grpR)
@@ -90,19 +92,26 @@ kcShort = showKC and not na(trend) and not na(adxv) and close < lower and close 
 kcLongFresh  = kcLong  and not kcLong[1]
 kcShortFresh = kcShort and not kcShort[1]
 
-// стан відкритої KC-позиції (режим "одна угода за раз")
-var bool  kcIn    = false
-var bool  kcLongP = false
+// стан відкритих позицій обох двигунів (резолвимо ОБИДВА на початку бара)
+var bool  kcIn     = false
+var bool  kcLongP  = false
 var float kcS = na
 var float kcT = na
+var bool  fvgIn    = false
+var bool  fvgLongP = false
+var float fvgS = na
+var float fvgT = na
 if barstate.isconfirmed and kcIn
-    hitS = kcLongP ? low <= kcS : high >= kcS
-    hitT = kcLongP ? high >= kcT : low <= kcT
-    if hitS or hitT
+    if (kcLongP ? low <= kcS : high >= kcS) or (kcLongP ? high >= kcT : low <= kcT)
         kcIn := false
+if barstate.isconfirmed and fvgIn
+    if (fvgLongP ? low <= fvgS : high >= fvgS) or (fvgLongP ? high >= fvgT : low <= fvgT)
+        fvgIn := false
 
-kcLongFire  = kcLongFresh  and barstate.isconfirmed and (not oneAtTime or not kcIn)
-kcShortFire = kcShortFresh and barstate.isconfirmed and (not oneAtTime or not kcIn)
+// блокування: у режимі perCoin нова угода тільки коли НЕМАЄ жодної позиції на монеті
+blockKC = perCoin ? (kcIn or fvgIn) : kcIn
+kcLongFire  = kcLongFresh  and barstate.isconfirmed and (not oneAtTime or not blockKC)
+kcShortFire = kcShortFresh and barstate.isconfirmed and (not oneAtTime or not blockKC)
 
 if kcLongFire
     D = kcStopX * atr14
@@ -144,17 +153,6 @@ float leTg = na
 float seZt = na
 float seSt = na
 float seTg = na
-
-// стан відкритої FVG-позиції (режим "одна угода за раз")
-var bool  fvgIn    = false
-var bool  fvgLongP = false
-var float fvgS = na
-var float fvgT = na
-if barstate.isconfirmed and fvgIn
-    hS = fvgLongP ? low <= fvgS : high >= fvgS
-    hT = fvgLongP ? high >= fvgT : low <= fvgT
-    if hS or hT
-        fvgIn := false
 
 if showFVG and barstate.isconfirmed
     // --- 1) спершу ретест наявних зон (тому сигнал не спрацює на барі формування) ---
@@ -208,8 +206,10 @@ if showFVG and barstate.isconfirmed
         if showZones
             box.new(bar_index, low[2], bar_index + fvgLook, high, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88))
 
-fvgLongFire  = fvgLong  and (not oneAtTime or not fvgIn)
-fvgShortFire = fvgShort and (not oneAtTime or not fvgIn)
+// блокування FVG (рахуємо тут, бо KC міг відкрити позицію цього ж бара)
+blockFVG = perCoin ? (kcIn or fvgIn) : fvgIn
+fvgLongFire  = fvgLong  and (not oneAtTime or not blockFVG)
+fvgShortFire = fvgShort and (not oneAtTime or not blockFVG)
 
 if fvgLongFire
     f_drawRR(true, leZt, leSt, leTg)
