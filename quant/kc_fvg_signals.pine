@@ -7,7 +7,7 @@
 //  ta.ema / ta.atr (RMA) / ta.dmi — Wilder-згладжування, збігається з python-движком.
 //  Алерти: створи Alert -> "Any alert() function call" -> "Once Per Bar Close".
 // ============================================================================
-indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500)
+indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
 
 // ----------------------------- Параметри ------------------------------------
 grpT = "Тренд / фільтр"
@@ -30,7 +30,24 @@ kcStopX  = input.float(2.0,"KC: стоп = ATR×", group=grpG)
 rr       = input.float(2.0,"Risk : Reward",   group=grpG)
 showKC   = input.bool(true, "Сигнали KC",       group=grpG)
 showFVG  = input.bool(true, "Сигнали FVG",      group=grpG)
-showZones= input.bool(true, "Малювати зони FVG",group=grpG)
+showZones= input.bool(false,"Малювати зони FVG (імбаланс)",group=grpG)
+
+grpR = "RR-бокс (як інструмент Long/Short Position)"
+boxBars = input.int(24, "Ширина боксу (барів вправо)", group=grpR)
+showLbl = input.bool(true, "Підпис із цінами на боксі", group=grpR)
+
+// малює готову позицію: зелена зона профіту + червона зона ризику + лінія входу
+f_drawRR(isLong, e, s, t) =>
+    l = bar_index
+    r = bar_index + boxBars
+    box.new(l, math.max(e, t), r, math.min(e, t), border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 80))
+    box.new(l, math.max(e, s), r, math.min(e, s), border_color=color.new(color.red, 50),   bgcolor=color.new(color.red, 80))
+    line.new(l, e, r, e, color=color.new(color.blue, 0), width=1)
+    if showLbl
+        pT = math.abs((t - e) / e * 100)
+        pS = math.abs((s - e) / e * 100)
+        txt = (isLong ? "LONG  " : "SHORT  ") + str.tostring(e, format.mintick) + "\n🎯 " + str.tostring(t, format.mintick) + " (" + str.tostring(pT, "#.#") + "%)\n🛑 " + str.tostring(s, format.mintick) + " (" + str.tostring(pS, "#.#") + "%)\nRR 1:" + str.tostring(rr, "#.#")
+        label.new(r, e, txt, style=label.style_label_left, color=color.new(isLong ? color.green : color.red, 20), textcolor=color.white, size=size.small)
 
 // ----------------------------- Індикатори -----------------------------------
 trend = ta.ema(close, trendLen)
@@ -58,14 +75,14 @@ if kcLongFresh
     e = close
     s = close - D
     t = close + rr * D
-    label.new(bar_index, low, "KC LONG\nвхід≈" + str.tostring(e, format.mintick) + "\nстоп " + str.tostring(s, format.mintick) + "\nціль " + str.tostring(t, format.mintick), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+    f_drawRR(true, e, s, t)
     alert("🟢 KC LONG " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
 if kcShortFresh
     D = kcStopX * atr14
     e = close
     s = close + D
     t = close - rr * D
-    label.new(bar_index, high, "KC SHORT\nвхід≈" + str.tostring(e, format.mintick) + "\nстоп " + str.tostring(s, format.mintick) + "\nціль " + str.tostring(t, format.mintick), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+    f_drawRR(false, e, s, t)
     alert("🔴 KC SHORT " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
 
 // =================== ДВИГУН 2: FVG RETEST (лімітка) =========================
@@ -139,10 +156,10 @@ if showFVG
             box.new(bar_index, low[2], bar_index + fvgLook, high, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88))
 
 if fvgLong
-    label.new(bar_index, low, "FVG LONG\nлімітка " + str.tostring(leZt, format.mintick) + "\nстоп " + str.tostring(leSt, format.mintick) + "\nціль " + str.tostring(leTg, format.mintick), style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.small)
+    f_drawRR(true, leZt, leSt, leTg)
     alert("🟩 FVG LONG " + syminfo.ticker + " | лімітка " + str.tostring(leZt, format.mintick) + " | стоп " + str.tostring(leSt, format.mintick) + " | тейк " + str.tostring(leTg, format.mintick), alert.freq_once_per_bar_close)
 if fvgShort
-    label.new(bar_index, high, "FVG SHORT\nлімітка " + str.tostring(seZt, format.mintick) + "\nстоп " + str.tostring(seSt, format.mintick) + "\nціль " + str.tostring(seTg, format.mintick), style=label.style_label_down, color=color.new(color.fuchsia, 0), textcolor=color.white, size=size.small)
+    f_drawRR(false, seZt, seSt, seTg)
     alert("🟥 FVG SHORT " + syminfo.ticker + " | лімітка " + str.tostring(seZt, format.mintick) + " | стоп " + str.tostring(seSt, format.mintick) + " | тейк " + str.tostring(seTg, format.mintick), alert.freq_once_per_bar_close)
 
 // ----------------------------- Табличка стану -------------------------------
