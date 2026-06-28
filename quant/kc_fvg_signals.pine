@@ -5,6 +5,8 @@
 //    1) KC breakout  — пробій каналу Кельтнера в бік тренду (маркет-вхід)
 //    2) FVG retest   — повернення ціни в 3-барний імбаланс у бік тренду (лімітка)
 //  ta.ema / ta.atr (RMA) / ta.dmi — Wilder-згладжування, збігається з python-движком.
+//  NON-REPAINT: сигнали/бокси малюються лише на ЗАКРИТІЙ свічці (barstate.isconfirmed),
+//  тому НЕ зникають після появи. Заходити — на закритті 4h-бара (= коли прийшов алерт).
 //  Алерти: створи Alert -> "Any alert() function call" -> "Once Per Bar Close".
 // ============================================================================
 indicator("KC + FVG Signals (4h)", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
@@ -70,14 +72,14 @@ kcShort = showKC and not na(trend) and not na(adxv) and close < lower and close 
 kcLongFresh  = kcLong  and not kcLong[1]
 kcShortFresh = kcShort and not kcShort[1]
 
-if kcLongFresh
+if kcLongFresh and barstate.isconfirmed
     D = kcStopX * atr14
     e = close
     s = close - D
     t = close + rr * D
     f_drawRR(true, e, s, t)
     alert("🟢 KC LONG " + syminfo.ticker + " | вхід(маркет) " + str.tostring(e, format.mintick) + " | стоп " + str.tostring(s, format.mintick) + " | тейк " + str.tostring(t, format.mintick) + " | ADX " + str.tostring(adxv, "#"), alert.freq_once_per_bar_close)
-if kcShortFresh
+if kcShortFresh and barstate.isconfirmed
     D = kcStopX * atr14
     e = close
     s = close + D
@@ -103,7 +105,7 @@ float seZt = na
 float seSt = na
 float seTg = na
 
-if showFVG
+if showFVG and barstate.isconfirmed
     // --- 1) спершу ретест наявних зон (тому сигнал не спрацює на барі формування) ---
     i = 0
     while i < array.size(bZt)
