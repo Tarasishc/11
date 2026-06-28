@@ -1,19 +1,18 @@
 """
-Сигнальний бот для KC-breakout стратегії (БЕЗ автоторгівлі — лише алерти в Telegram).
-Рахує сигнали на ЗАКРИТТІ 4h-бара і шле повідомлення; заходиш РУКАМИ.
+Сигнальний бот: 2 двигуни (KC breakout + FVG retest) -> Telegram. БЕЗ автоторгівлі.
+Заходиш РУКАМИ за сигналом. Стратегія = §18/§27 дослідження (4h, BTC/ETH/SOL).
 
-Запуск у СЕБЕ (не в цьому середовищі — тут немає доступу до бірж/Telegram):
+Запуск У СЕБЕ (не в цьому середовищі — тут немає доступу до бірж/Telegram):
     pip install ccxt requests pandas numpy
-    # 1) Створи бота в Telegram через @BotFather -> отримай TOKEN
-    # 2) Дізнайся свій CHAT_ID: напиши боту, потім відкрий
-    #    https://api.telegram.org/bot<TOKEN>/getUpdates -> поле "chat":{"id":...}
-    # 3) Впиши TOKEN/CHAT_ID нижче і запусти:
-    python signal_bot.py            # робочий режим (цикл, чекає 4h-закриття)
-    python signal_bot.py once       # одна перевірка зараз і вихід
+    # @BotFather -> TOKEN; свій CHAT_ID: напиши боту, відкрий
+    #   https://api.telegram.org/bot<TOKEN>/getUpdates -> "chat":{"id":...}
+    python signal_bot.py            # робочий цикл (чекає 4h-закриття)
+    python signal_bot.py once       # одна перевірка зараз
     python signal_bot.py selftest   # перевірка логіки на локальних CSV (без мережі)
 
-Стратегія (точно як у дослідженні, §18): 4h. LONG: close>верх Keltner & close>EMA200 & ADX>20.
-SHORT: дзеркально. Стоп 2*ATR(14), тейк 4*ATR(14) (RR 1:2).
+KC LONG : close>верх Keltner & close>EMA200 & ADX>20  (SHORT дзеркально)
+FVG LONG: bull FVG (max[-3]<low[-1]) у аптренді (close>EMA200), ціна ретестить зону
+Стоп KC = 2*ATR(14); FVG = за межу зони (мін 0.5*ATR). Тейк = RR 1:2.
 """
 import sys, json, time, os
 from datetime import datetime, timezone, timedelta
@@ -23,24 +22,26 @@ import pandas as pd
 # ============================== КОНФІГ ==============================
 TG_TOKEN   = "PUT_YOUR_BOT_TOKEN_HERE"
 TG_CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
-EXCHANGE   = "bybit"                       # або "binance"
-SYMBOLS    = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]  # perp; для споту прибери :USDT
+EXCHANGE   = "bybit"
+SYMBOLS    = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
 TIMEFRAME  = "4h"
+ENGINES    = ("KC", "FVG")          # які двигуни вмикати
 ADX_MIN    = 20
-KC_EMA, KC_ATR, KC_MULT = 20, 10, 2.0     # Keltner: EMA20 +/- 2*ATR10
+KC_EMA, KC_ATR, KC_MULT = 20, 10, 2.0
 TREND_EMA  = 200
 ATR_STOP   = 14
-STOP_MULT  = 2.0
 RR         = 2.0
-ACCOUNT    = 1000.0                        # розмір депозиту ($) для підказки розміру
-RISK_PCT   = 0.02                          # ризик на угоду (2% — рекоменд., §15)
-SESSION_FILTER = False                     # True = слати лише входи 00-12 UTC (опц., §10)
+FVG_LOOKAHEAD  = 20                  # скільки барів зона FVG лишається активною
+FVG_ATR_FLOOR  = 0.5                 # мін. стоп = 0.5*ATR (для вузьких зон)
+ACCOUNT    = 1000.0
+RISK_PCT   = 0.01                    # 1% (≈7%/міс @ DD~36%); 1.5% для ~10%/міс
+LEV_CAP    = 5.0                     # нагадування: сумарна експозиція <= 5x депо
+SESSION_FILTER = False               # True = лише входи 00-12 UTC (опц., KC)
 STATE_FILE = "signal_bot_state.json"
-DRY_RUN    = False                         # True = друкувати замість надсилати
+DRY_RUN    = False
 # ===================================================================
 
 
-# ---------- індикатори (точно як engine.py) ----------
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def _tr(df):
     pc = df["close"].shift(1)
@@ -48,57 +49,80 @@ def _tr(df):
 def atr(df, n): return _tr(df).ewm(alpha=1/n, adjust=False).mean()
 def adx(df, n=14):
     up = df["high"].diff(); dn = -df["low"].diff()
-    plus_dm = ((up > dn) & (up > 0)) * up
-    minus_dm = ((dn > up) & (dn > 0)) * dn
+    pdm = ((up > dn) & (up > 0)) * up; mdm = ((dn > up) & (dn > 0)) * dn
     a = _tr(df).ewm(alpha=1/n, adjust=False).mean()
-    pdi = 100*plus_dm.ewm(alpha=1/n, adjust=False).mean()/a
-    mdi = 100*minus_dm.ewm(alpha=1/n, adjust=False).mean()/a
+    pdi = 100*pdm.ewm(alpha=1/n, adjust=False).mean()/a
+    mdi = 100*mdm.ewm(alpha=1/n, adjust=False).mean()/a
     dx = 100*(pdi-mdi).abs()/(pdi+mdi).replace(0, np.nan)
     return dx.ewm(alpha=1/n, adjust=False).mean()
 
 
-def check_signal(df):
-    """df = закриті 4h-бари (останній рядок = останній ЗАКРИТИЙ бар).
-    Повертає dict сигналу або None."""
-    if len(df) < TREND_EMA + 30:
-        return None
-    c = df["close"]
-    mid = ema(c, KC_EMA); band = KC_MULT*atr(df, KC_ATR)
-    upper, lower = mid+band, mid-band
-    trend = ema(c, TREND_EMA)
-    ax = adx(df, 14); a_stop = atr(df, ATR_STOP)
-    i = -1  # останній закритий бар
-    px = c.iloc[i]; ad = ax.iloc[i]; sd = a_stop.iloc[i]*STOP_MULT
-    if not np.isfinite(ad) or ad < ADX_MIN or sd <= 0:
-        return None
-    def is_long(k): return c.iloc[k] > upper.iloc[k] and c.iloc[k] > trend.iloc[k] and ax.iloc[k] > ADX_MIN
-    def is_short(k): return c.iloc[k] < lower.iloc[k] and c.iloc[k] < trend.iloc[k] and ax.iloc[k] > ADX_MIN
-    side = None
-    # лише СВІЖИЙ пробій (на попередньому барі сигналу цього боку не було) — не спамити, поки в позиції
-    if is_long(-1) and not is_long(-2):
-        side = "LONG"
-    elif is_short(-1) and not is_short(-2):
-        side = "SHORT"
-    if side is None:
-        return None
-    if SESSION_FILTER:
-        # година ВХОДУ = година наступного бара = година_цього_бара+4
-        entry_hour = (df.index[i].hour + 4) % 24
-        if entry_hour not in (0, 4, 8):
-            return None
-    if side == "LONG":
-        stop = px - sd; target = px + RR*sd
-    else:
-        stop = px + sd; target = px - RR*sd
-    qty = (ACCOUNT*RISK_PCT)/sd
-    return dict(side=side, bar_time=df.index[i], price=px, stop=stop, target=target,
-                adx=ad, atr=a_stop.iloc[i], stop_dist=sd, qty=qty, notional=qty*px)
+def _pack(strat, side, entry, stop, target, bar_time, adx_val=None):
+    D = abs(entry-stop)
+    qty = (ACCOUNT*RISK_PCT)/D if D > 0 else 0
+    return dict(strat=strat, side=side, price=entry, stop=stop, target=target,
+                stop_dist=D, qty=qty, notional=qty*entry, adx=adx_val, bar_time=bar_time)
 
 
-# ---------- Telegram ----------
+def check_kc(df):
+    """KC breakout — свіжий пробій на останньому ЗАКРИТОМУ барі."""
+    if len(df) < TREND_EMA + 30: return None
+    c = df["close"]; mid = ema(c, KC_EMA); band = KC_MULT*atr(df, KC_ATR)
+    up, lo = mid+band, mid-band; tr = ema(c, TREND_EMA); ax = adx(df, 14); a = atr(df, ATR_STOP)
+    if not np.isfinite(ax.iloc[-1]) or ax.iloc[-1] < ADX_MIN: return None
+    def isL(k): return c.iloc[k] > up.iloc[k] and c.iloc[k] > tr.iloc[k] and ax.iloc[k] > ADX_MIN
+    def isS(k): return c.iloc[k] < lo.iloc[k] and c.iloc[k] < tr.iloc[k] and ax.iloc[k] > ADX_MIN
+    side = "LONG" if (isL(-1) and not isL(-2)) else ("SHORT" if (isS(-1) and not isS(-2)) else None)
+    if side is None: return None
+    if SESSION_FILTER and ((df.index[-1].hour+4) % 24) not in (0, 4, 8): return None
+    px = c.iloc[-1]; sd = 2*a.iloc[-1]
+    if sd <= 0: return None
+    if side == "LONG":  return _pack("KC", side, px, px-sd, px+RR*sd, df.index[-1], ax.iloc[-1])
+    else:               return _pack("KC", side, px, px+sd, px-RR*sd, df.index[-1], ax.iloc[-1])
+
+
+def check_fvg(df):
+    """FVG retest — останній закритий бар ВПЕРШЕ ретестить активну FVG-зону у бік тренду."""
+    if len(df) < TREND_EMA + 30: return None
+    c = df["close"]; em = ema(c, TREND_EMA); a = atr(df, ATR_STOP)
+    H = df["high"].values; Lw = df["low"].values; C = c.values; EM = em.values
+    j = len(df)-1; A = a.iloc[-1]
+    if not np.isfinite(A) or A <= 0: return None
+    lo_b = max(2, j-FVG_LOOKAHEAD)
+    # bull: найсвіжіша FVG, яку поточний бар ретестить вперше
+    for f in range(j-1, lo_b-1, -1):
+        if H[f-2] < Lw[f] and C[f] > EM[f]:                       # bull FVG у аптренді
+            zt, zb = Lw[f], H[f-2]
+            if Lw[j] <= zt and C[j] > EM[j] and all(Lw[b] > zt for b in range(f+1, j)):
+                D = max(zt-zb, FVG_ATR_FLOOR*A)
+                return _pack("FVG", "LONG", zt, zt-D, zt+RR*D, df.index[-1])
+    for f in range(j-1, lo_b-1, -1):
+        if Lw[f-2] > H[f] and C[f] < EM[f]:                       # bear FVG у даунтренді
+            zt, zb = H[f], Lw[f-2]
+            if H[j] >= zt and C[j] < EM[j] and all(H[b] < zt for b in range(f+1, j)):
+                D = max(zb-zt, FVG_ATR_FLOOR*A)
+                return _pack("FVG", "SHORT", zt, zt+D, zt-RR*D, df.index[-1])
+    return None
+
+
+def fmt(sym, s):
+    em = "🟢" if s["side"] == "LONG" else "🔴"
+    extra = f"ADX={s['adx']:.0f}\n" if s.get("adx") is not None else ""
+    how = ("➡️ Вхід marketable-limit зараз + OCO (стоп+тейк)." if s["strat"] == "KC"
+           else f"➡️ Постав ЛІМІТКУ на {s['price']:.4f} (вхід у зону), дій ~3 дні + OCO.")
+    return (f"{em} <b>{s['strat']} {s['side']} {sym}</b> (4h)\n"
+            f"Бар: {s['bar_time']:%Y-%m-%d %H:%M} UTC\n"
+            f"Вхід: <b>{s['price']:.4f}</b>\n"
+            f"Стоп: <b>{s['stop']:.4f}</b> ({s['stop_dist']:.4f})\n"
+            f"Тейк: <b>{s['target']:.4f}</b> (RR 1:{RR:.0f})\n{extra}"
+            f"Розмір під {RISK_PCT*100:.1f}% ризику (${ACCOUNT:.0f}): {s['qty']:.4f} "
+            f"(ноціонал ${s['notional']:.0f})\n"
+            f"⚠️ Сумарна експозиція ≤{LEV_CAP:.0f}×; 3-тя в один бік ×0.6.\n{how}")
+
+
 def send_tg(text):
     if DRY_RUN or TG_TOKEN.startswith("PUT_"):
-        print("[DRY/НЕ НАЛАШТОВАНО] " + text.replace("\n", " | ")); return
+        print("[DRY] " + text.replace("\n", " | ")); return
     import requests
     for _ in range(3):
         try:
@@ -109,106 +133,80 @@ def send_tg(text):
             print("TG error:", e); time.sleep(3)
 
 
-def fmt(sym, s):
-    emoji = "🟢" if s["side"] == "LONG" else "🔴"
-    return (f"{emoji} <b>{s['side']} {sym}</b>  (4h)\n"
-            f"Сигнал-бар: {s['bar_time']:%Y-%m-%d %H:%M} UTC\n"
-            f"Вхід (≈ринок зараз): <b>{s['price']:.4f}</b>\n"
-            f"Стоп: <b>{s['stop']:.4f}</b>  (2·ATR={s['stop_dist']:.4f})\n"
-            f"Тейк: <b>{s['target']:.4f}</b>  (RR 1:{RR:.0f})\n"
-            f"ADX={s['adx']:.0f}\n"
-            f"Розмір під {RISK_PCT*100:.0f}% ризику (депо ${ACCOUNT:.0f}): "
-            f"{s['qty']:.4f} (ноціонал ≈${s['notional']:.0f})\n"
-            f"➡️ Заходь marketable-limit; одразу постав OCO (стоп+тейк).")
-
-
-# ---------- стан (де-дублікація) ----------
-def load_state():
-    if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
-    return {}
+def load_state(): return json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {}
 def save_state(st): json.dump(st, open(STATE_FILE, "w"))
 
 
-# ---------- дані (ccxt) ----------
 def fetch(ex, sym):
-    o = ex.fetch_ohlcv(sym, TIMEFRAME, limit=TREND_EMA+60)
+    o = ex.fetch_ohlcv(sym, TIMEFRAME, limit=TREND_EMA+FVG_LOOKAHEAD+40)
     df = pd.DataFrame(o, columns=["ts", "open", "high", "low", "close", "vol"])
-    df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    df = df.set_index("dt")
-    # відкинути НЕЗАКРИТИЙ останній бар
-    tf_ms = ex.parse_timeframe(TIMEFRAME)*1000
-    now_ms = ex.milliseconds()
-    if df["ts"].iloc[-1] + tf_ms > now_ms:
-        df = df.iloc[:-1]
+    df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True); df = df.set_index("dt")
+    if df["ts"].iloc[-1] + ex.parse_timeframe(TIMEFRAME)*1000 > ex.milliseconds():
+        df = df.iloc[:-1]                                # відкинути незакритий бар
     return df[["open", "high", "low", "close", "vol"]]
 
 
 def run_once(ex, st):
+    checks = {"KC": check_kc, "FVG": check_fvg}
     for sym in SYMBOLS:
         try:
-            df = fetch(ex, sym)
-            sig = check_signal(df)
-            if sig:
-                key = sym
-                bar_id = sig["bar_time"].isoformat()
-                if st.get(key) == bar_id:
-                    continue   # вже алертили цей бар
-                send_tg(fmt(sym, sig))
-                st[key] = bar_id
-            print(f"{datetime.now(timezone.utc):%H:%M} {sym}: {'СИГНАЛ '+sig['side'] if sig else 'нема'}")
+            df = fetch(ex, sym); fired = []
+            for eng in ENGINES:
+                sig = checks[eng](df)
+                if sig:
+                    key = f"{sym}:{eng}"; bid = sig["bar_time"].isoformat()
+                    if st.get(key) != bid:
+                        send_tg(fmt(sym, sig)); st[key] = bid; fired.append(f"{eng} {sig['side']}")
+            print(f"{datetime.now(timezone.utc):%H:%M} {sym}: {', '.join(fired) if fired else 'нема'}")
         except Exception as e:
             print(f"{sym} помилка: {e}")
     save_state(st)
 
 
 def next_4h_wakeup():
-    now = datetime.now(timezone.utc)
-    h = (now.hour // 4 + 1)*4
+    now = datetime.now(timezone.utc); h = (now.hour//4 + 1)*4
     nxt = now.replace(minute=1, second=30, microsecond=0, hour=0) + timedelta(hours=h)
-    return (nxt - now).total_seconds()
+    return max((nxt-now).total_seconds(), 60)
 
 
 def selftest():
-    """Перевірка логіки на локальних CSV (без мережі): скільки сигналів в історії."""
-    import glob
-    print("SELF-TEST на локальних CSV (логіка сигналів):")
+    print("SELF-TEST (логіка на локальних CSV, векторно):")
     for sym, path in [("BTC", "quant/data/btc_15m.csv"), ("ETH", "quant/data/eth_4h.csv"),
                       ("SOL", "quant/data/sol_4h.csv")]:
         if not os.path.exists(path): continue
-        raw = pd.read_csv(path)
-        raw.columns = [x.strip().lower() for x in raw.columns]
-        tcol = "ts" if "ts" in raw.columns else "time"
-        if tcol == "ts":
-            raw["dt"] = pd.to_datetime(raw["ts"], unit="ms", utc=True)
-        else:
-            raw["dt"] = pd.to_datetime(raw["time"].astype(str).str.strip('"'), utc=True)
+        raw = pd.read_csv(path); raw.columns = [x.strip().lower() for x in raw.columns]
+        if "ts" in raw.columns: raw["dt"] = pd.to_datetime(raw["ts"], unit="ms", utc=True)
+        else: raw["dt"] = pd.to_datetime(raw["time"].astype(str).str.strip('"'), utc=True)
         df = raw.set_index("dt")[["open", "high", "low", "close"]].astype(float)
         if (df.index[1]-df.index[0]) < pd.Timedelta(hours=4):
             df = df.resample("4h").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna()
-        # векторно: свіжі пробої (сигнал зараз, але не на попередньому барі)
-        c = df["close"]; mid = ema(c, KC_EMA); band = KC_MULT*atr(df, KC_ATR)
-        tr = ema(c, TREND_EMA); ax = adx(df, 14)
-        L = (c > mid+band) & (c > tr) & (ax > ADX_MIN)
-        S = (c < mid-band) & (c < tr) & (ax > ADX_MIN)
-        freshL = L & ~L.shift(1, fill_value=False); freshS = S & ~S.shift(1, fill_value=False)
-        last = df.index[(freshL | freshS)][-1] if (freshL | freshS).any() else None
-        print(f"  {sym}: свіжих LONG={int(freshL.sum())} SHORT={int(freshS.sum())} | останній: {last}")
-    print("OK — логіка працює (свіжі пробої ~ к-сть угод у бектесті).")
+        c = df["close"]; mid = ema(c, KC_EMA); band = KC_MULT*atr(df, KC_ATR); tr = ema(c, TREND_EMA); ax = adx(df, 14)
+        L = (c > mid+band) & (c > tr) & (ax > ADX_MIN); S = (c < mid-band) & (c < tr) & (ax > ADX_MIN)
+        kc = (L & ~L.shift(1, fill_value=False)).sum() + (S & ~S.shift(1, fill_value=False)).sum()
+        # FVG ретести — швидкий підрахунок (індикатори рахуємо 1 раз)
+        em = ema(c, TREND_EMA).values; H = df["high"].values; Lw = df["low"].values; C = c.values; n = len(df); fv = 0
+        for f in range(2, n):
+            if H[f-2] < Lw[f] and C[f] > em[f]:
+                zt = Lw[f]
+                for j in range(f+1, min(f+1+FVG_LOOKAHEAD, n)):
+                    if Lw[j] <= zt:
+                        fv += 1 if C[j] > em[j] else 0; break
+            if Lw[f-2] > H[f] and C[f] < em[f]:
+                zt = H[f]
+                for j in range(f+1, min(f+1+FVG_LOOKAHEAD, n)):
+                    if H[j] >= zt:
+                        fv += 1 if C[j] < em[j] else 0; break
+        print(f"  {sym}: KC свіжих={int(kc)} | FVG ретестів={fv} | останній бар {df.index[-1]}")
+    print("OK — обидва двигуни працюють.")
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "loop"
-    if mode == "selftest":
-        selftest(); sys.exit()
+    if mode == "selftest": selftest(); sys.exit()
     import ccxt
-    ex = getattr(ccxt, EXCHANGE)({"enableRateLimit": True})
-    st = load_state()
-    if mode == "once":
-        run_once(ex, st); sys.exit()
-    send_tg("✅ Сигнальний бот запущено. Стежу за " + ", ".join(SYMBOLS) + f" ({TIMEFRAME}).")
+    ex = getattr(ccxt, EXCHANGE)({"enableRateLimit": True}); st = load_state()
+    if mode == "once": run_once(ex, st); sys.exit()
+    send_tg(f"✅ Бот запущено. Двигуни: {', '.join(ENGINES)}. Стежу: {', '.join(SYMBOLS)} ({TIMEFRAME}).")
     while True:
         run_once(ex, st)
-        slp = max(next_4h_wakeup(), 60)
-        print(f"Сплю {slp/60:.0f} хв до наступного 4h-закриття...")
-        time.sleep(slp)
+        slp = next_4h_wakeup(); print(f"Сплю {slp/60:.0f} хв до 4h-закриття..."); time.sleep(slp)
