@@ -51,6 +51,7 @@ TF          = "4h"
 RR          = 2.0
 LEV_CAP     = 5.0
 REPORT_HOUR_UTC = int(os.getenv("BOT_REPORT_HOUR", "8"))      # година UTC для звіту
+NOTIFY_TRADES = os.getenv("BOT_NOTIFY_TRADES", "1") == "1"    # 1=слати кожну угоду (вхід/вихід)
 STATE_FILE  = os.getenv("BOT_STATE", "bot_state.json")
 
 # монета -> які двигуни; ccxt-символ Binance USDM
@@ -257,9 +258,16 @@ def dry_fill_and_manage(st, symbol, bar):
     hi, lo = bar["high"], bar["low"]; closed = None
     if p["status"] == "pending":              # лімітка FVG чекає фолу
         hit = lo <= p["entry"] if p["side"] == "long" else hi >= p["entry"]
-        if hit: p["status"] = "in_pos"
+        if hit:
+            p["status"] = "in_pos"
+            if NOTIFY_TRADES:
+                tg(f"📥 Лімітка зайшла {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
+                   f"(стоп {p['stop']:.4f} / тейк {p['target']:.4f})")
         elif bar["i"] >= p["expiry_i"]:       # не зайшло -> скасувати
-            st["pos"].pop(symbol); return
+            st["pos"].pop(symbol)
+            if NOTIFY_TRADES:
+                tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
+            return
     if p.get("status") == "in_pos":
         if p["side"] == "long":
             if lo <= p["stop"]: closed = ("stop", p["stop"])
@@ -277,6 +285,10 @@ def dry_fill_and_manage(st, symbol, bar):
                                  side=p["side"], r=round(r, 2), pnl=round(pnl, 2),
                                  reason=reason))
         st["pos"].pop(symbol)
+        if NOTIFY_TRADES:
+            emo = "✅" if r > 0 else "❌"
+            tg(f"{emo} <b>Закрито {symbol} {p['side'].upper()}</b> ({p['engine']}) — {reason}\n"
+               f"R {r:+.2f} | PnL {pnl:+.2f} USDT | депозит {st['equity']:.2f}")
 
 # ----------------------------- ОБРОБКА ОДНОГО БАРА ---------------------------
 def handle_symbol(ex, st, symbol, df):
@@ -304,13 +316,15 @@ def handle_symbol(ex, st, symbol, df):
                                  engine=cand["engine"], side=cand["side"],
                                  entry=cand["entry"], stop=cand["stop"], target=cand["target"],
                                  qty=qty, expiry_i=bar["i"] + FVG_EXPIRY)
-        tg("[DRY] " + msg)
+        if NOTIFY_TRADES:
+            tag = "⏳ Виставлено лімітку " if cand["typ"] == "limit" else "📥 Вхід "
+            tg("[DRY] " + tag + "\n" + msg)
     else:
         try:
             place_live(ex, symbol, cand, qty)
             st["pos"][symbol] = dict(status="live", engine=cand["engine"], side=cand["side"],
                                      entry=cand["entry"], stop=cand["stop"], target=cand["target"], qty=qty)
-            tg("✅ " + msg)
+            if NOTIFY_TRADES: tg("✅ " + msg)
         except Exception as e:
             tg(f"⚠️ помилка ордера {symbol}: {e}")
 
