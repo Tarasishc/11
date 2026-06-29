@@ -49,6 +49,10 @@ TG_TOKEN    = os.getenv("TG_TOKEN", "")
 TG_CHAT     = os.getenv("TG_CHAT_ID", "")
 RISK_PCT    = float(os.getenv("BOT_RISK", "0.01"))
 MAX_DAILY_LOSS = float(os.getenv("BOT_MAX_DAILY_LOSS", "0.10"))
+# реалізм для ПАПЕРУ (щоб не брехав): комісія/сторону, слип входу, ДОДАТКОВИЙ слип стопа
+FEE_RATE   = float(os.getenv("BOT_FEE", "0.0004"))
+ENTRY_SLIP = float(os.getenv("BOT_ENTRY_SLIP", "0.0004"))
+STOP_SLIP  = float(os.getenv("BOT_STOP_SLIP", "0.0010"))
 START_EQUITY = float(os.getenv("BOT_PAPER_EQUITY", "1000"))   # стартовий депозит для DRY_RUN
 TF          = "4h"
 RR          = 2.0
@@ -283,8 +287,11 @@ def dry_fill_and_manage(st, symbol, bar):
             elif lo <= p["target"]: closed = ("target", p["target"])
     if closed:
         reason, px = closed
-        r = (px - p["entry"]) / (p["entry"] - p["stop"]) if p["side"] == "long" \
-            else (p["entry"] - px) / (p["stop"] - p["entry"])
+        sgn = 1 if p["side"] == "long" else -1
+        en, D = p["entry"], abs(p["entry"] - p["stop"])
+        en_f = en * (1 + sgn * ENTRY_SLIP)                       # гірший філ входу
+        ex_f = px * (1 - sgn * STOP_SLIP) if reason == "stop" else px  # стоп проскакує; тейк=лімітка (точно)
+        r = sgn * (ex_f - en_f) / D - 2 * FEE_RATE * (en_f / D)   # + комісії обидві сторони
         pnl = st["equity"] * RISK_PCT * r
         st["equity"] += pnl
         st["trades"].append(dict(t=str(bar["dt"]), sym=symbol, eng=p["engine"],
