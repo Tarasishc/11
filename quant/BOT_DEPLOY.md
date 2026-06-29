@@ -36,7 +36,8 @@ set -a; source bot.env; set +a            # підвантажити змінн�
 # А) офлайн-перевірка логіки
 python quant/trade_bot.py selftest
 
-# Б) ПАПІР 2–4 тижні (реальні ціни, фейкові угоди)
+# Б) ПАПІР 2–4 тижні (реальні ціни, фейкові угоди) — BOT_DRY_RUN=1, BOT_TESTNET=0
+#    для паперу Binance-ключі НЕ потрібні, лише TG_TOKEN + TG_CHAT_ID
 python quant/trade_bot.py run
 
 # В) TESTNET (BOT_DRY_RUN=0, BOT_TESTNET=1 у bot.env) — реальні ордери, тестові гроші
