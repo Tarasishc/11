@@ -17,17 +17,18 @@ OUT    = "bnb_4h.csv"    # ім'я файлу (нижній регістр, як
 SINCE  = "2020-01-01T00:00:00Z"   # від цієї дати (раніше лістингу — візьме від наявного)
 
 since = EX.parse8601(SINCE)
-limit = 1500
+now   = EX.milliseconds()
 rows  = []
-while True:
-    batch = EX.fetch_ohlcv(SYMBOL, TF, since=since, limit=limit)
+while since < now:
+    batch = EX.fetch_ohlcv(SYMBOL, TF, since=since, limit=1000)
     if not batch:
         break
     rows += batch
-    since = batch[-1][0] + 1
-    print(f"  {len(rows):6d} барів, останній {EX.iso8601(batch[-1][0])}")
-    if len(batch) < limit:
+    last = batch[-1][0]
+    if last == since:          # часовий курсор не зрушив — виходимо
         break
+    since = last + 1
+    print(f"  {len(rows):6d} барів, останній {EX.iso8601(last)}")
     time.sleep(EX.rateLimit / 1000)
 
 # дедуп за timestamp + сортування за часом
