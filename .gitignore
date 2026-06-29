@@ -17,3 +17,4 @@ quant/out/C_*
 quant/out/*.pkl
 signal_bot_state.json
 quant/signal_bot_state.json
+bot.env

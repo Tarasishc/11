@@ -164,6 +164,70 @@ def position_qty(equity, entry, stop):
         qty = equity * LEV_CAP / entry
     return qty
 
+# ----------------------------- ПРОДАКШН-ХЕЛПЕРИ -----------------------------
+# запасні мінімуми (USDT нотіонал, base qty) — якщо немає доступу до load_markets
+MIN_FALLBACK = {
+    "BTC/USDT": dict(min_cost=50, min_amt=0.001),
+    "ETH/USDT": dict(min_cost=20, min_amt=0.001),
+    "SOL/USDT": dict(min_cost=5,  min_amt=0.01),
+    "BNB/USDT": dict(min_cost=5,  min_amt=0.001),
+}
+_MARKETS_OK = False
+
+def with_retry(fn, *a, tries=4, **k):
+    for i in range(tries):
+        try:
+            return fn(*a, **k)
+        except Exception:
+            if i == tries - 1: raise
+            time.sleep(2 ** i)
+
+def load_markets_safe(ex):
+    global _MARKETS_OK
+    try:
+        ex.load_markets(); _MARKETS_OK = True
+    except Exception as e:
+        print("  load_markets не вдалось (офлайн?) — запасні мінімуми:", e)
+
+def limits_for(ex, symbol):
+    if _MARKETS_OK:
+        try:
+            lim = ex.market(symbol).get("limits", {})
+            mc = (lim.get("cost", {}) or {}).get("min")
+            ma = (lim.get("amount", {}) or {}).get("min")
+            if mc or ma:
+                return mc or MIN_FALLBACK[symbol]["min_cost"], ma or MIN_FALLBACK[symbol]["min_amt"]
+        except Exception:
+            pass
+    f = MIN_FALLBACK.get(symbol, dict(min_cost=5, min_amt=0))
+    return f["min_cost"], f["min_amt"]
+
+def valid_size(ex, symbol, qty, price):
+    """Округлення + перевірка мінімумів біржі. None -> угоду ПРОПУСКАЄМО (НЕ оверризик!)."""
+    min_cost, min_amt = limits_for(ex, symbol)
+    try:
+        qty = float(ex.amount_to_precision(symbol, qty)) if _MARKETS_OK else round(qty, 6)
+    except Exception:
+        qty = round(qty, 6)
+    if qty < (min_amt or 0): return None
+    if price * qty < (min_cost or 0): return None
+    return qty
+
+def reconcile(ex, st):
+    """Старт у live: синхронізуємо стан із реальними відкритими позиціями."""
+    if DRY_RUN: return
+    try:
+        for p in with_retry(ex.fetch_positions) or []:
+            amt = float(p.get("contracts") or (p.get("info", {}) or {}).get("positionAmt") or 0)
+            sym = p.get("symbol")
+            if abs(amt) > 0 and sym in COINS and sym not in st["pos"]:
+                st["pos"][sym] = dict(status="live", side="long" if amt > 0 else "short",
+                                      engine="?", entry=float(p.get("entryPrice") or 0),
+                                      stop=None, target=None, qty=abs(amt))
+        tg(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
+    except Exception as e:
+        print("reconcile помилка:", e)
+
 # ----------------------------- ВИКОНАННЯ (live) -----------------------------
 def place_live(ex, symbol, cand, qty):
     side = "buy" if cand["side"] == "long" else "sell"
@@ -226,7 +290,10 @@ def handle_symbol(ex, st, symbol, df):
     cand = cands[0]                                       # перший сигнал бере слот
     eq = equity_now(ex, st)
     qty = position_qty(eq, cand["entry"], cand["stop"])
-    if qty <= 0: return
+    qty = valid_size(ex, symbol, qty, cand["entry"])      # мінімуми біржі: краще пропустити, ніж оверризик
+    if not qty:
+        print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі — мало капіталу для цього стопа")
+        return
     lev = cand["entry"] * qty / eq
     msg = (f"{'🟢' if cand['side']=='long' else '🔴'} <b>{cand['engine']} "
            f"{cand['side'].upper()}</b> {symbol}\n"
@@ -281,7 +348,7 @@ def run_once(ex, st, force_report=False):
     halted = check_day_and_killswitch(st, eq)
     for symbol in COINS:
         try:
-            df = fetch_closed(ex, symbol)
+            df = with_retry(fetch_closed, ex, symbol)
         except Exception as e:
             print(f"  fetch {symbol}: {e}"); continue
         last = str(df["dt"].iloc[-1])
@@ -313,6 +380,8 @@ def main():
         return selftest()
     st = load_state()
     ex = make_exchange()
+    load_markets_safe(ex)
+    reconcile(ex, st)
     if mode == "once":
         run_once(ex, st); daily_report(st, equity_now(ex, st)); return
     if mode == "report":
