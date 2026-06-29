@@ -37,6 +37,9 @@ try:
 except Exception:
     pass
 
+def _utcnow():                                   # naive UTC (без DeprecationWarning від utcnow)
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
 # ----------------------------- КОНФІГ ---------------------------------------
 DRY_RUN     = os.getenv("BOT_DRY_RUN", "1") == "1"
 TESTNET     = os.getenv("BOT_TESTNET", "1") == "1"
@@ -333,7 +336,7 @@ def handle_symbol(ex, st, symbol, df):
 
 # ----------------------------- KILL-SWITCH + ЗВІТ ---------------------------
 def check_day_and_killswitch(st, eq):
-    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    today = _utcnow().strftime("%Y-%m-%d")
     if st["day"] != today:
         st["day"] = today; st["day_start_equity"] = eq; st["halted"] = False
     dd = (eq - st["day_start_equity"]) / st["day_start_equity"] if st["day_start_equity"] else 0
@@ -344,13 +347,13 @@ def check_day_and_killswitch(st, eq):
     return st["halted"]
 
 def daily_report(st, eq):
-    since = dt.datetime.utcnow() - dt.timedelta(hours=24)
+    since = _utcnow() - dt.timedelta(hours=24)
     rec = [t for t in st["trades"] if pd.Timestamp(t["t"]).to_pydatetime().replace(tzinfo=None) >= since]
     nr = len(rec); wins = sum(1 for t in rec if t["r"] > 0)
     sumR = sum(t["r"] for t in rec); pnl = sum(t["pnl"] for t in rec)
     openp = "; ".join(f"{k.split('/')[0]} {v['side']}({v['engine']})" for k, v in st["pos"].items()) or "немає"
     wr = f"{wins/nr*100:.0f}%" if nr else "—"
-    lines = [f"📊 <b>Денний звіт</b> {dt.datetime.utcnow():%Y-%m-%d %H:%M}Z",
+    lines = [f"📊 <b>Денний звіт</b> {_utcnow():%Y-%m-%d %H:%M}Z",
              f"Депозит: <b>{eq:.2f}</b> USDT  ({'DRY' if DRY_RUN else ('TESTNET' if TESTNET else 'LIVE')})",
              f"За 24г: угод {nr}, WR {wr}, сума {sumR:+.2f}R, PnL {pnl:+.2f} USDT",
              f"Відкриті: {openp}",
@@ -409,7 +412,7 @@ def main():
     while True:
         try:
             run_once(ex, st)
-            now = dt.datetime.utcnow()
+            now = _utcnow()
             if now.hour == REPORT_HOUR_UTC and now.strftime("%Y-%m-%d") != last_report_day:
                 daily_report(st, equity_now(ex, st)); last_report_day = now.strftime("%Y-%m-%d")
         except Exception as e:
