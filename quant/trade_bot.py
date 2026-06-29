@@ -120,13 +120,16 @@ def detect(df, engines):
 def tg(msg):
     print("[TG]", msg.replace("\n", " | ")[:300])
     if not (TG_TOKEN and TG_CHAT): return
-    try:
-        data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": msg,
-                                       "parse_mode": "HTML"}).encode()
-        urllib.request.urlopen(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                               data=data, timeout=15)
-    except Exception as e:
-        print("  TG помилка:", e)
+    for cid in str(TG_CHAT).split(","):          # кілька чатів через кому (особистий, група, канал)
+        cid = cid.strip()
+        if not cid: continue
+        try:
+            data = urllib.parse.urlencode({"chat_id": cid, "text": msg,
+                                           "parse_mode": "HTML"}).encode()
+            urllib.request.urlopen(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                   data=data, timeout=15)
+        except Exception as e:
+            print(f"  TG помилка ({cid}):", e)
 
 # ----------------------------- СТАН -----------------------------------------
 def load_state():
