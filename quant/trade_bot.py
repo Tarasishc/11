@@ -99,6 +99,7 @@ def detect(df, engines):
     trend = ema(c, EMA_TREND); ax = adx(df, ADX_LEN); a14 = atr(df, STOP_ATR)
     out = []
     px = lambda s, k: s.iloc[k]
+    axv = float(px(ax, i)) if np.isfinite(px(ax, i)) else None   # ADX на сигнальному барі (форвард-лог)
     # --- KC: свіжий пробій у бік тренду + ADX ---
     if "KC" in engines and np.isfinite(px(ax, i)):
         def kc_state(k, side):
@@ -107,22 +108,22 @@ def detect(df, engines):
         D = KC_STOP_X * px(a14, i); entry = px(c, i)   # вхід ≈ ціна закриття (далі маркет на відкритті)
         if kc_state(i, +1) and not kc_state(i - 1, +1):
             out.append(dict(engine="KC", side="long", typ="market",
-                            entry=entry, stop=entry - D, target=entry + RR * D))
+                            entry=entry, stop=entry - D, target=entry + RR * D, adx=axv))
         if kc_state(i, -1) and not kc_state(i - 1, -1):
             out.append(dict(engine="KC", side="short", typ="market",
-                            entry=entry, stop=entry + D, target=entry - RR * D))
+                            entry=entry, stop=entry + D, target=entry - RR * D, adx=axv))
     # --- FVG: новий 3-барний імбаланс у бік тренду -> лімітка на краю зони ---
     if "FVG" in engines and np.isfinite(px(a14, i)):
         if px(df["high"], i - 2) < px(df["low"], i) and px(c, i) > px(trend, i):
             zt, zb = px(df["low"], i), px(df["high"], i - 2)
             D = max(zt - zb, FVG_FLOOR * px(a14, i))
             out.append(dict(engine="FVG", side="long", typ="limit",
-                            entry=zt, stop=zt - D, target=zt + RR * D))
+                            entry=zt, stop=zt - D, target=zt + RR * D, adx=axv))
         if px(df["low"], i - 2) > px(df["high"], i) and px(c, i) < px(trend, i):
             zt, zb = px(df["high"], i), px(df["low"], i - 2)
             D = max(zb - zt, FVG_FLOOR * px(a14, i))
             out.append(dict(engine="FVG", side="short", typ="limit",
-                            entry=zt, stop=zt + D, target=zt - RR * D))
+                            entry=zt, stop=zt + D, target=zt - RR * D, adx=axv))
     return out
 
 # ----------------------------- TELEGRAM -------------------------------------
@@ -314,7 +315,7 @@ def poll_live(ex, st):
                 cancel_symbol_orders(ex, symbol)          # прибрати завислий протилежний ордер
                 r = 2.0 if reason == "target" else (-1.0 if reason == "stop" else 0.0)
                 st["trades"].append(dict(t=str(_utcnow()), sym=symbol, eng=p.get("engine", "?"),
-                                         side=p.get("side"), r=r, pnl=0.0, reason=reason))
+                                         side=p.get("side"), r=r, pnl=0.0, reason=reason, adx=p.get("adx")))
                 st["pos"].pop(symbol)
                 if NOTIFY_TRADES:
                     tg(f"{'✅' if r > 0 else '❌'} <b>Закрито {symbol} {str(p.get('side')).upper()}</b> "
@@ -358,7 +359,7 @@ def dry_fill_and_manage(st, symbol, bar):
         st["equity"] += pnl
         st["trades"].append(dict(t=str(bar["dt"]), sym=symbol, eng=p["engine"],
                                  side=p["side"], r=round(r, 2), pnl=round(pnl, 2),
-                                 reason=reason))
+                                 reason=reason, adx=p.get("adx")))
         st["pos"].pop(symbol)
         if NOTIFY_TRADES:
             emo = "✅" if r > 0 else "❌"
@@ -382,15 +383,21 @@ def handle_symbol(ex, st, symbol, df):
         print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі — мало капіталу для цього стопа")
         return
     lev = cand["entry"] * qty / eq
+    axv = cand.get("adx")
+    adx_tag = ""
+    if axv is not None:                                   # форвард-лог фільтра ADX≥20 на FVG
+        weak = cand["engine"] == "FVG" and axv < ADX_MIN
+        adx_tag = f"\nADX {axv:.1f}" + (" ⚠️ слабкий тренд (<20) — форвард-тест фільтра" if weak else " ✓")
     msg = (f"{'🟢' if cand['side']=='long' else '🔴'} <b>{cand['engine']} "
            f"{cand['side'].upper()}</b> {symbol}\n"
            f"вхід({cand['typ']}) {cand['entry']:.4f} | стоп {cand['stop']:.4f} | "
-           f"тейк {cand['target']:.4f}\nрозмір {qty:.4f} (плече ~{lev:.1f}x, ризик {RISK_PCT*100:.1f}%)")
+           f"тейк {cand['target']:.4f}\nрозмір {qty:.4f} (плече ~{lev:.1f}x, ризик {RISK_PCT*100:.1f}%)"
+           + adx_tag)
     if DRY_RUN:
         st["pos"][symbol] = dict(status=("pending" if cand["typ"] == "limit" else "in_pos"),
                                  engine=cand["engine"], side=cand["side"],
                                  entry=cand["entry"], stop=cand["stop"], target=cand["target"],
-                                 qty=qty, bars_waited=0)
+                                 qty=qty, bars_waited=0, adx=axv)
         if NOTIFY_TRADES:
             tag = "⏳ Виставлено лімітку " if cand["typ"] == "limit" else "📥 Вхід "
             tg("[DRY] " + tag + "\n" + msg)
@@ -400,7 +407,7 @@ def handle_symbol(ex, st, symbol, df):
             st["pos"][symbol] = dict(status=("pending" if cand["typ"] == "limit" else "in_pos"),
                                      engine=cand["engine"], side=cand["side"], entry=cand["entry"],
                                      stop=cand["stop"], target=cand["target"], qty=qty,
-                                     ids=ids, bars_waited=0)
+                                     ids=ids, bars_waited=0, adx=axv)
             if NOTIFY_TRADES: tg("✅ " + msg)
         except Exception as e:
             tg(f"⚠️ помилка ордера {symbol}: {e}")
@@ -430,7 +437,11 @@ def daily_report(st, eq):
              f"Відкриті: {openp}",
              f"Всього угод у журналі: {len(st['trades'])}",
              f"Бенчмарк: очікування ≈ +0.2R/угода (якщо за 30+ угод нижче 0 — стоп)"]
-    if st.get("halted"): lines.append("🛑 СЬОГОДНІ ЗУПИНЕНО (kill-switch)")
+    fvg = [t for t in st["trades"] if t.get("eng") == "FVG" and t.get("adx") is not None]
+    if fvg:                                              # накопичувальний форвард-тест фільтра ADX
+        lo = [t["r"] for t in fvg if t["adx"] < ADX_MIN]; hi = [t["r"] for t in fvg if t["adx"] >= ADX_MIN]
+        av = lambda x: sum(x) / len(x) if x else 0.0
+        lines.append(f"🔬 FVG форвард ADX: &lt;20 → {len(lo)}уг {av(lo):+.2f}R | ≥20 → {len(hi)}уг {av(hi):+.2f}R")
     tg("\n".join(lines))
 
 # ----------------------------- ЦИКЛ -----------------------------------------
