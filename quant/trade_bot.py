@@ -266,18 +266,20 @@ def dry_fill_and_manage(st, symbol, bar):
     p = st["pos"].get(symbol)
     if not p: return
     hi, lo = bar["high"], bar["low"]; closed = None
-    if p["status"] == "pending":              # лімітка FVG чекає фолу
+    if p["status"] == "pending":              # лімітка FVG чекає РЕТЕСТУ (на нових барах)
         hit = lo <= p["entry"] if p["side"] == "long" else hi >= p["entry"]
         if hit:
             p["status"] = "in_pos"
             if NOTIFY_TRADES:
                 tg(f"📥 Лімітка зайшла {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
                    f"(стоп {p['stop']:.4f} / тейк {p['target']:.4f})")
-        elif bar["i"] >= p["expiry_i"]:       # не зайшло -> скасувати
-            st["pos"].pop(symbol)
-            if NOTIFY_TRADES:
-                tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
-            return
+        else:                                 # не зайшло цього бару -> лічильник очікування
+            p["bars_waited"] = p.get("bars_waited", 0) + 1
+            if p["bars_waited"] >= FVG_EXPIRY:
+                st["pos"].pop(symbol)
+                if NOTIFY_TRADES:
+                    tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
+            return                            # цього бару більше нічого не робимо
     if p.get("status") == "in_pos":
         if p["side"] == "long":
             if lo <= p["stop"]: closed = ("stop", p["stop"])
@@ -328,7 +330,7 @@ def handle_symbol(ex, st, symbol, df):
         st["pos"][symbol] = dict(status=("pending" if cand["typ"] == "limit" else "in_pos"),
                                  engine=cand["engine"], side=cand["side"],
                                  entry=cand["entry"], stop=cand["stop"], target=cand["target"],
-                                 qty=qty, expiry_i=bar["i"] + FVG_EXPIRY)
+                                 qty=qty, bars_waited=0)
         if NOTIFY_TRADES:
             tag = "⏳ Виставлено лімітку " if cand["typ"] == "limit" else "📥 Вхід "
             tg("[DRY] " + tag + "\n" + msg)
@@ -380,10 +382,8 @@ def run_once(ex, st, force_report=False):
             print(f"  fetch {symbol}: {e}"); continue
         last = str(df["dt"].iloc[-1])
         if st["last_bar"].get(symbol) == last and not force_report:
-            # бар не новий — лише ведемо відкриті паперові позиції
-            if DRY_RUN:
-                handle_symbol_manage_only(st, symbol, df)
-            continue
+            continue   # бар не новий -> НІЧОГО (управляємо лише на закритті НОВИХ барів,
+                       # інакше фантомні філи проти бару формування)
         st["last_bar"][symbol] = last
         if halted:                       # стоп-вхід, але відкриті ведемо
             if DRY_RUN: handle_symbol_manage_only(st, symbol, df)
