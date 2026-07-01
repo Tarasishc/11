@@ -154,15 +154,15 @@ def make_exchange():
     ex = ccxt.binanceusdm({"apiKey": API_KEY, "secret": API_SECRET,
                            "enableRateLimit": True})
     if TESTNET:
-        # Binance Demo Trading (ф'ючерси). Нові ccxt прибрали set_sandbox_mode
-        # для ф'ючерсів (кидає NotSupported) -> робимо ВРУЧНУ те саме, що робив
-        # старий sandbox: накладаємо test-URL (testnet.binancefuture.com) поверх
-        # живих. Демо-ключі Binance автентифікуються саме на цьому хості.
+        # Binance Demo Trading (ф'ючерсний testnet). set_sandbox_mode наводить
+        # URL на testnet.binancefuture.com. Новий ccxt ДОДАТКОВО блокує ф'ючерсне
+        # демо в sign() (raise NotSupported), доки не ввімкнути офіційний прапорець
+        # disableFuturesSandboxWarning — це «кнопка згоди»: демо працює нормально.
         try:
-            ex.set_sandbox_mode(True)                       # старі версії ccxt
-        except Exception:
+            ex.set_sandbox_mode(True)
+        except Exception:                                    # старі/інші версії ccxt
             ex.urls["api"] = ex.deep_extend(ex.urls["api"], ex.urls["test"])
-            ex.options["sandboxMode"] = True
+        ex.options["disableFuturesSandboxWarning"] = True
     return ex
 
 def fetch_closed(ex, symbol, limit=320):
