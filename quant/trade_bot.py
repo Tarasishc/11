@@ -12,7 +12,8 @@
 
 БЕЗПЕКА (за замовчуванням НІЧОГО реального не робить):
   • DRY_RUN=1  -> паперова торгівля (ніяких реальних ордерів)
-  • TESTNET=1  -> якщо вимкнеш DRY_RUN, торгує на ТЕСТ-мережі Binance
+  • TESTNET=1  -> якщо вимкнеш DRY_RUN, торгує на Binance Demo Trading (testnet
+                 ф'ючерсів). Реальні ордери на демо-балансі + сигнали в TG.
   • Kill-switch: денний збиток > MAX_DAILY_LOSS -> зупинка + алерт
   • Реальні гроші тільки коли DRY_RUN=0 і TESTNET=0 і явно задані ключі.
 
@@ -20,6 +21,7 @@
   python trade_bot.py run       # основний цикл (перевіряє закриття 4h-барів)
   python trade_bot.py once      # один прохід
   python trade_bot.py report    # надіслати щоденний звіт зараз
+  python trade_bot.py balance   # діагностика: показати баланс і куди йдуть запити
   python trade_bot.py selftest  # офлайн-перевірка логіки на локальних CSV (без біржі)
 
 ЗМІННІ ОТОЧЕННЯ:
@@ -151,7 +153,16 @@ def make_exchange():
     if ccxt is None: raise RuntimeError("немає ccxt: pip install ccxt")
     ex = ccxt.binanceusdm({"apiKey": API_KEY, "secret": API_SECRET,
                            "enableRateLimit": True})
-    if TESTNET: ex.set_sandbox_mode(True)
+    if TESTNET:
+        # Binance Demo Trading (ф'ючерси). Нові ccxt прибрали set_sandbox_mode
+        # для ф'ючерсів (кидає NotSupported) -> робимо ВРУЧНУ те саме, що робив
+        # старий sandbox: накладаємо test-URL (testnet.binancefuture.com) поверх
+        # живих. Демо-ключі Binance автентифікуються саме на цьому хості.
+        try:
+            ex.set_sandbox_mode(True)                       # старі версії ccxt
+        except Exception:
+            ex.urls["api"] = ex.deep_extend(ex.urls["api"], ex.urls["test"])
+            ex.options["sandboxMode"] = True
     return ex
 
 def fetch_closed(ex, symbol, limit=320):
@@ -163,7 +174,9 @@ def fetch_closed(ex, symbol, limit=320):
 def equity_now(ex, st):
     if DRY_RUN: return st["equity"]
     try: return float(ex.fetch_balance()["USDT"]["total"])
-    except Exception: return st["equity"]
+    except Exception as e:
+        print("equity_now: fetch_balance не вдалось ->", repr(e))  # у журнал, не мовчки
+        return st["equity"]
 
 # ----------------------------- РОЗМІР ПОЗИЦІЇ -------------------------------
 def position_qty(equity, entry, stop):
@@ -465,6 +478,16 @@ def main():
     st = load_state()
     ex = make_exchange()
     load_markets_safe(ex)
+    if mode == "balance":                    # діагностика підключення (демо/лайв)
+        api = ex.urls.get("api", {})
+        url = api.get("fapiPrivate") if isinstance(api, dict) else api
+        print(f"режим ключів: {'DEMO/TESTNET' if TESTNET else 'LIVE'} | запити -> {url}")
+        try:
+            b = ex.fetch_balance()["USDT"]
+            print(f"✅ Баланс USDT: total={b['total']} | free={b['free']}")
+        except Exception as e:
+            print("❌ fetch_balance:", repr(e))
+        return
     reconcile(ex, st)
     if mode == "once":
         run_once(ex, st); daily_report(st, equity_now(ex, st)); return
