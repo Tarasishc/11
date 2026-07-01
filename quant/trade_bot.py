@@ -247,18 +247,65 @@ def place_live(ex, symbol, cand, qty):
     except Exception: pass
     try: ex.set_leverage(int(LEV_CAP), symbol)
     except Exception: pass
-    q = float(ex.amount_to_precision(symbol, qty))
+    q = float(ex.amount_to_precision(symbol, qty)); ids = {}
     if cand["typ"] == "market":
-        ex.create_order(symbol, "market", side, q)
+        ids["entry"] = ex.create_order(symbol, "market", side, q).get("id")
     else:  # FVG: пост-онлі лімітка на краю зони
         p = float(ex.price_to_precision(symbol, cand["entry"]))
-        ex.create_order(symbol, "limit", side, q, p, {"timeInForce": "GTX"})
+        ids["entry"] = ex.create_order(symbol, "limit", side, q, p, {"timeInForce": "GTX"}).get("id")
     # захисні ордери (reduceOnly): стоп = STOP_MARKET, тейк = LIMIT(мейкер)
     sp = float(ex.price_to_precision(symbol, cand["stop"]))
     tp = float(ex.price_to_precision(symbol, cand["target"]))
-    ex.create_order(symbol, "STOP_MARKET", opp, q, None,
-                    {"stopPrice": sp, "reduceOnly": True})
-    ex.create_order(symbol, "limit", opp, q, tp, {"reduceOnly": True})
+    ids["stop"] = ex.create_order(symbol, "STOP_MARKET", opp, q, None,
+                                  {"stopPrice": sp, "reduceOnly": True}).get("id")
+    ids["tp"] = ex.create_order(symbol, "limit", opp, q, tp, {"reduceOnly": True}).get("id")
+    return ids
+
+# ---- опитування реальних позицій (testnet/live): філи, закриття, скасування ----
+def live_pos_amt(ex, symbol):
+    try:
+        for pos in with_retry(ex.fetch_positions, [symbol]):
+            if pos.get("symbol") == symbol:
+                return abs(float(pos.get("contracts") or (pos.get("info", {}) or {}).get("positionAmt") or 0))
+    except Exception as e:
+        print("pos", symbol, e)
+    return 0.0
+
+def cancel_symbol_orders(ex, symbol):
+    try:
+        for o in with_retry(ex.fetch_open_orders, symbol):
+            try: ex.cancel_order(o["id"], symbol)
+            except Exception: pass
+    except Exception: pass
+
+def poll_live(ex, st):
+    """Кожен цикл на testnet/live: детект філа лімітки та закриття позиції -> TG + звільнення слота."""
+    if DRY_RUN: return
+    for symbol in list(st["pos"].keys()):
+        p = st["pos"][symbol]
+        amt = live_pos_amt(ex, symbol)
+        if p.get("status") == "pending":
+            if amt > 0:                                   # лімітка виконалась
+                p["status"] = "in_pos"
+                if NOTIFY_TRADES:
+                    tg(f"📥 Філ {symbol} {p['side'].upper()} @ ~{p.get('entry',0):.4f} "
+                       f"(стоп {p.get('stop',0):.4f} / тейк {p.get('target',0):.4f})")
+        elif p.get("status") in ("in_pos", "live"):
+            if amt == 0:                                  # позиція закрилась на біржі
+                open_ids = set()
+                try: open_ids = {o["id"] for o in with_retry(ex.fetch_open_orders, symbol)}
+                except Exception: pass
+                ids = p.get("ids", {})
+                reason = "target" if ids.get("tp") and ids["tp"] not in open_ids else \
+                         ("stop" if ids.get("stop") and ids["stop"] not in open_ids else "?")
+                cancel_symbol_orders(ex, symbol)          # прибрати завислий протилежний ордер
+                r = 2.0 if reason == "target" else (-1.0 if reason == "stop" else 0.0)
+                st["trades"].append(dict(t=str(_utcnow()), sym=symbol, eng=p.get("engine", "?"),
+                                         side=p.get("side"), r=r, pnl=0.0, reason=reason))
+                st["pos"].pop(symbol)
+                if NOTIFY_TRADES:
+                    tg(f"{'✅' if r > 0 else '❌'} <b>Закрито {symbol} {str(p.get('side')).upper()}</b> "
+                       f"({p.get('engine','?')}) — {reason} (~{r:+.1f}R)")
 
 # ----------------------------- DRY-RUN симуляція фолу -----------------------
 def dry_fill_and_manage(st, symbol, bar):
@@ -336,9 +383,11 @@ def handle_symbol(ex, st, symbol, df):
             tg("[DRY] " + tag + "\n" + msg)
     else:
         try:
-            place_live(ex, symbol, cand, qty)
-            st["pos"][symbol] = dict(status="live", engine=cand["engine"], side=cand["side"],
-                                     entry=cand["entry"], stop=cand["stop"], target=cand["target"], qty=qty)
+            ids = place_live(ex, symbol, cand, qty)
+            st["pos"][symbol] = dict(status=("pending" if cand["typ"] == "limit" else "in_pos"),
+                                     engine=cand["engine"], side=cand["side"], entry=cand["entry"],
+                                     stop=cand["stop"], target=cand["target"], qty=qty,
+                                     ids=ids, bars_waited=0)
             if NOTIFY_TRADES: tg("✅ " + msg)
         except Exception as e:
             tg(f"⚠️ помилка ордера {symbol}: {e}")
@@ -373,6 +422,7 @@ def daily_report(st, eq):
 
 # ----------------------------- ЦИКЛ -----------------------------------------
 def run_once(ex, st, force_report=False):
+    if not DRY_RUN: poll_live(ex, st)          # testnet/live: детект філів/закриттів на біржі -> TG
     eq = equity_now(ex, st)
     halted = check_day_and_killswitch(st, eq)
     for symbol in COINS:
@@ -385,6 +435,13 @@ def run_once(ex, st, force_report=False):
             continue   # бар не новий -> НІЧОГО (управляємо лише на закритті НОВИХ барів,
                        # інакше фантомні філи проти бару формування)
         st["last_bar"][symbol] = last
+        # новий бар: expiry невиконаної лімітки на testnet/live
+        if not DRY_RUN and st["pos"].get(symbol, {}).get("status") == "pending":
+            p = st["pos"][symbol]; p["bars_waited"] = p.get("bars_waited", 0) + 1
+            if p["bars_waited"] >= FVG_EXPIRY:
+                cancel_symbol_orders(ex, symbol); st["pos"].pop(symbol)
+                if NOTIFY_TRADES: tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
+                continue
         if halted:                       # стоп-вхід, але відкриті ведемо
             if DRY_RUN: handle_symbol_manage_only(st, symbol, df)
             continue
