@@ -25,6 +25,7 @@
   python trade_bot.py once      # один прохід
   python trade_bot.py report    # надіслати щоденний звіт зараз
   python trade_bot.py balance   # діагностика: показати баланс і куди йдуть запити
+  python trade_bot.py close SOL/USDT   # закрити позицію+ордери по монеті (або: close all)
   python trade_bot.py selftest  # офлайн-перевірка логіки на локальних CSV (без біржі)
 
 ЗМІННІ ОТОЧЕННЯ:
@@ -337,6 +338,44 @@ def ensure_protective(ex, symbol, p, amt):
     except Exception as e:
         tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
 
+def live_pos_signed(ex, symbol):
+    """Позиція зі знаком (+лонг/-шорт), 0 якщо нема."""
+    try:
+        for pos in with_retry(ex.fetch_positions, [symbol]):
+            if pos.get("symbol") == symbol:
+                raw = (pos.get("info", {}) or {}).get("positionAmt")
+                if raw is not None: return float(raw)
+                amt = abs(float(pos.get("contracts") or 0))
+                return -amt if pos.get("side") == "short" else amt
+    except Exception as e:
+        print("pos_signed", symbol, e)
+    return 0.0
+
+def close_command(ex, st, target):
+    """Ручне закриття через бота: скасувати ордери + закрити позицію маркетом (reduceOnly)."""
+    syms = [target] if target != "all" else sorted(set(list(st["pos"].keys()) + list(COINS.keys())))
+    for sym in syms:
+        if DRY_RUN:
+            if st["pos"].pop(sym, None): tg(f"🧹 [DRY] Слот {sym} очищено вручну")
+            continue
+        cancel_symbol_orders(ex, sym)
+        amt = live_pos_signed(ex, sym)
+        if amt != 0:
+            side = "sell" if amt > 0 else "buy"
+            q = float(ex.amount_to_precision(sym, abs(amt)))
+            try:
+                ex.create_order(sym, "market", side, q, None, {"reduceOnly": True})
+                tg(f"🧹 Закрито вручну через бота: {sym} ({'LONG' if amt > 0 else 'SHORT'} {q})")
+            except Exception as e:
+                print("close", sym, e); tg(f"⚠️ не вдалось закрити {sym}: {e}"); continue
+        p = st["pos"].pop(sym, None)
+        if p and p.get("status") in ("in_pos", "live"):
+            st["trades"].append(dict(t=str(_utcnow()), sym=sym, eng=p.get("engine", "?"),
+                                     side=p.get("side"), r=0.0, pnl=0.0,
+                                     reason="manual", adx=p.get("adx")))
+    save_state(st)
+    print("close: готово.", "Слоти:", list(st["pos"].keys()) or "порожньо")
+
 def poll_live(ex, st):
     """Кожен цикл на testnet/live: детект філа лімітки та закриття позиції -> TG + звільнення слота."""
     if DRY_RUN: return
@@ -615,6 +654,8 @@ def main():
         except Exception as e:
             print("❌ fetch_balance:", repr(e))
         return
+    if mode == "close":
+        return close_command(ex, st, sys.argv[2] if len(sys.argv) > 2 else "all")
     reconcile(ex, st)
     if mode == "once":
         run_once(ex, st); daily_report(st, equity_now(ex, st)); return
