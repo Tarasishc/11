@@ -1,12 +1,15 @@
 """
 АВТОМАТИЧНИЙ ТОРГОВИЙ БОТ — стратегія KC+FVG (Binance USDⓈ-M), з щоденним звітом у Telegram.
 
-ПРАВИЛА (точно як у дослідженні):
-  • Монети/двигуни: BTC,ETH,SOL = KC+FVG ; BNB = тільки FVG
+ПРАВИЛА (конфіг за 15m-істиною, скрипти 73-79):
+  • Монети/двигуни: ETH, SOL = KC+FVG  (BTC слабший, BNB без еджу — прибрані)
   • ТФ 4h, дії ЛИШЕ на закритих барах (non-repaint)
   • Одна позиція на монету (бо два шорти на біржі зливаються)
   • KC: пробій каналу Кельтнера в бік EMA200 + ADX≥20 -> вхід МАРКЕТОМ
-  • FVG: 3-барний імбаланс у бік EMA200 -> ЛІМІТКА на краю зони (мейкер), чекає ретест
+  • FVG-ПАКЕТ (mid50+wait>2+ADX20): 3-барний імбаланс у бік EMA200 ->
+    лімітка на 50% ЗОНИ; озброюється лише з 3-го бару після формування
+    (ретест у перші 2 бари = сетап згорів); філ приймається лише при
+    тренді і ADX≥20 (лімітка знімається, поки умови погані)
   • Стоп = STOP-MARKET (гарантований вихід), Тейк = LIMIT (мейкер), RR 1:2
   • Розмір від РИЗИКУ: qty = equity*RISK_PCT / |entry-stop|   (плече саме виходить безпечним)
 
@@ -64,12 +67,12 @@ NOTIFY_TRADES = os.getenv("BOT_NOTIFY_TRADES", "1") == "1"    # 1=слати к�
 STATE_FILE  = os.getenv("BOT_STATE", "bot_state.json")
 
 # монета -> які двигуни; ccxt-символ Binance USDM
+# (15m-істина: BTC найслабший з трійки, BNB без еджу -> торгуємо ETH+SOL)
 COINS = {
-    "BTC/USDT": ["KC", "FVG"],
     "ETH/USDT": ["KC", "FVG"],
     "SOL/USDT": ["KC", "FVG"],
-    "BNB/USDT": ["FVG"],          # на BNB KC слабкий -> лишаємо тільки FVG
 }
+FVG_WAIT = 2                          # анти-миттєвий-ретест: перші 2 бари = згорів
 # параметри індикаторів (1-в-1 з бектестом)
 EMA_TREND, KC_EMA, KC_ATR, KC_MULT = 200, 20, 10, 2.0
 ADX_LEN, ADX_MIN, STOP_ATR, KC_STOP_X = 14, 20, 14, 2.0
@@ -112,19 +115,25 @@ def detect(df, engines):
         if kc_state(i, -1) and not kc_state(i - 1, -1):
             out.append(dict(engine="KC", side="short", typ="market",
                             entry=entry, stop=entry + D, target=entry - RR * D, adx=axv))
-    # --- FVG: новий 3-барний імбаланс у бік тренду -> лімітка на краю зони ---
+    # --- FVG-пакет: новий 3-барний імбаланс у бік тренду -> ОЗБРОЄННЯ (watch) ---
+    #     Лімітка на 50% зони; стоп/тейк/розмір рахуються при озброєнні (через 2 бари).
     if "FVG" in engines and np.isfinite(px(a14, i)):
         if px(df["high"], i - 2) < px(df["low"], i) and px(c, i) > px(trend, i):
             zt, zb = px(df["low"], i), px(df["high"], i - 2)
-            D = max(zt - zb, FVG_FLOOR * px(a14, i))
-            out.append(dict(engine="FVG", side="long", typ="limit",
-                            entry=zt, stop=zt - D, target=zt + RR * D, adx=axv))
+            out.append(dict(engine="FVG", side="long", typ="arm",
+                            entry=(zt + zb) / 2, zb=zb, adx=axv))
         if px(df["low"], i - 2) > px(df["high"], i) and px(c, i) < px(trend, i):
             zt, zb = px(df["high"], i), px(df["low"], i - 2)
-            D = max(zb - zt, FVG_FLOOR * px(a14, i))
-            out.append(dict(engine="FVG", side="short", typ="limit",
-                            entry=zt, stop=zt + D, target=zt - RR * D, adx=axv))
+            out.append(dict(engine="FVG", side="short", typ="arm",
+                            entry=(zt + zb) / 2, zb=zb, adx=axv))
     return out
+
+def fvg_conditions_ok(df, side):
+    """Умови філа FVG на останньому ЗАКРИТОМУ барі: тренд EMA200 + ADX>=20 (як у KC)."""
+    c = df["close"]; i = len(df) - 1
+    tr = ema(c, EMA_TREND).iloc[i]; ax = adx(df, ADX_LEN).iloc[i]
+    tok = c.iloc[i] > tr if side == "long" else c.iloc[i] < tr
+    return bool(tok and np.isfinite(ax) and ax >= ADX_MIN)
 
 # ----------------------------- TELEGRAM -------------------------------------
 def tg(msg):
@@ -144,7 +153,16 @@ def tg(msg):
 # ----------------------------- СТАН -----------------------------------------
 def load_state():
     if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
+        st = json.load(open(STATE_FILE))
+        # міграція: старі FVG-слоти (лімітка на краю зони, без 'zb') несумісні з пакетом ->
+        # знімаємо; їхні ордери на біржі прибере reconcile (список _stale). Відкритих позицій не чіпаємо.
+        stale = []
+        for sym in list(st.get("pos", {}).keys()):
+            p = st["pos"][sym]
+            if p.get("engine") == "FVG" and p.get("status") in ("watch", "pending") and "zb" not in p:
+                st["pos"].pop(sym); stale.append(sym)
+        if stale: st["_stale"] = sorted(set(st.get("_stale", []) + stale))
+        return st
     return {"equity": START_EQUITY, "day": "", "day_start_equity": START_EQUITY,
             "halted": False, "pos": {}, "last_bar": {}, "trades": []}
 def save_state(s): json.dump(s, open(STATE_FILE, "w"), indent=1, default=str)
@@ -252,6 +270,9 @@ def reconcile(ex, st):
         for sym in COINS:                            # прибрати ОРФАНИ: ордери по монеті без відстеж. позиції
             if sym not in st["pos"]:
                 cancel_symbol_orders(ex, sym)
+        for sym in st.pop("_stale", []):             # ордери знятих при міграції слотів (у т.ч. поза COINS)
+            if sym not in st["pos"]:
+                cancel_symbol_orders(ex, sym)
         tg(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
     except Exception as e:
         print("reconcile помилка:", e)
@@ -349,60 +370,135 @@ def poll_live(ex, st):
                        f"({p.get('engine','?')}) — {reason} (~{r:+.1f}R)")
 
 # ----------------------------- DRY-RUN симуляція фолу -----------------------
+def paper_close(st, symbol, p, reason, px, bar_dt):
+    """Паперове закриття з реалізмом (слип входу/стопа + комісії) і TG."""
+    sgn = 1 if p["side"] == "long" else -1
+    en, D = p["entry"], abs(p["entry"] - p["stop"])
+    en_f = en * (1 + sgn * ENTRY_SLIP)                       # гірший філ входу
+    ex_f = px * (1 - sgn * STOP_SLIP) if reason == "stop" else px  # стоп проскакує; тейк=лімітка
+    r = sgn * (ex_f - en_f) / D - 2 * FEE_RATE * (en_f / D)   # + комісії обидві сторони
+    pnl = st["equity"] * RISK_PCT * r
+    st["equity"] += pnl
+    st["trades"].append(dict(t=str(bar_dt), sym=symbol, eng=p["engine"],
+                             side=p["side"], r=round(r, 2), pnl=round(pnl, 2),
+                             reason=reason, adx=p.get("adx")))
+    st["pos"].pop(symbol, None)
+    if NOTIFY_TRADES:
+        emo = "✅" if r > 0 else "❌"
+        tg(f"{emo} <b>Закрито {symbol} {p['side'].upper()}</b> ({p['engine']}) — {reason}\n"
+           f"R {r:+.2f} | PnL {pnl:+.2f} USDT | депозит {st['equity']:.2f}")
+
 def dry_fill_and_manage(st, symbol, bar):
-    """Паперова логіка: перевіряємо філ лімітки, спрацювання стопа/тейка по барі."""
+    """Паперове ведення ВІДКРИТОЇ позиції: стоп/тейк по закритому бару.
+    На барі філа FVG тейк не зараховуємо (no_tgt_bar) — чесність 15m-істини."""
     p = st["pos"].get(symbol)
-    if not p: return
+    if not p or p.get("status") != "in_pos": return
     hi, lo = bar["high"], bar["low"]; closed = None
-    if p["status"] == "pending":              # лімітка FVG чекає РЕТЕСТУ (на нових барах)
-        hit = lo <= p["entry"] if p["side"] == "long" else hi >= p["entry"]
-        if hit:
-            p["status"] = "in_pos"
-            if NOTIFY_TRADES:
-                tg(f"📥 Лімітка зайшла {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
-                   f"(стоп {p['stop']:.4f} / тейк {p['target']:.4f})")
-        else:                                 # не зайшло цього бару -> лічильник очікування
-            p["bars_waited"] = p.get("bars_waited", 0) + 1
-            if p["bars_waited"] >= FVG_EXPIRY:
-                st["pos"].pop(symbol)
-                if NOTIFY_TRADES:
-                    tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
-            return                            # цього бару більше нічого не робимо
-    if p.get("status") == "in_pos":
-        if p["side"] == "long":
-            if lo <= p["stop"]: closed = ("stop", p["stop"])
-            elif hi >= p["target"]: closed = ("target", p["target"])
-        else:
-            if hi >= p["stop"]: closed = ("stop", p["stop"])
-            elif lo <= p["target"]: closed = ("target", p["target"])
+    tgt_ok = str(bar["dt"]) != p.get("no_tgt_bar")
+    if p["side"] == "long":
+        if lo <= p["stop"]: closed = ("stop", p["stop"])
+        elif tgt_ok and hi >= p["target"]: closed = ("target", p["target"])
+    else:
+        if hi >= p["stop"]: closed = ("stop", p["stop"])
+        elif tgt_ok and lo <= p["target"]: closed = ("target", p["target"])
     if closed:
-        reason, px = closed
-        sgn = 1 if p["side"] == "long" else -1
-        en, D = p["entry"], abs(p["entry"] - p["stop"])
-        en_f = en * (1 + sgn * ENTRY_SLIP)                       # гірший філ входу
-        ex_f = px * (1 - sgn * STOP_SLIP) if reason == "stop" else px  # стоп проскакує; тейк=лімітка (точно)
-        r = sgn * (ex_f - en_f) / D - 2 * FEE_RATE * (en_f / D)   # + комісії обидві сторони
-        pnl = st["equity"] * RISK_PCT * r
-        st["equity"] += pnl
-        st["trades"].append(dict(t=str(bar["dt"]), sym=symbol, eng=p["engine"],
-                                 side=p["side"], r=round(r, 2), pnl=round(pnl, 2),
-                                 reason=reason, adx=p.get("adx")))
+        paper_close(st, symbol, p, closed[0], closed[1], bar["dt"])
+
+# ------------------------ FVG-ПАКЕТ: машина станів ---------------------------
+def step_fvg_slot(ex, st, symbol, df):
+    """На кожному НОВОМУ закритому барі веде FVG-слот: watch -> pending -> філ/смерть.
+    watch: 2 бари після формування; ретест у цей час = сетап згорів.
+    pending: лімітка на 50% зони; тримається на книзі лише коли тренд+ADX ок
+    (інакше знімається — філ при поганих умовах = смерть сетапу в бектесті)."""
+    p = st["pos"].get(symbol)
+    if not p or p.get("engine") != "FVG" or p.get("status") not in ("watch", "pending"): return
+    bar_h, bar_l = df["high"].iloc[-1], df["low"].iloc[-1]
+    bar_dt = df["dt"].iloc[-1]
+    p["bars_waited"] = p.get("bars_waited", 0) + 1
+    touched = bar_l <= p["entry"] if p["side"] == "long" else bar_h >= p["entry"]
+    if p["status"] == "watch":
+        if touched:                                   # ретест зарано -> фільтр wait>2
+            st["pos"].pop(symbol)
+            if NOTIFY_TRADES: tg(f"🚫 FVG {symbol}: ретест у перші {FVG_WAIT} бари — сетап згорів")
+            return
+        if p["bars_waited"] >= FVG_WAIT:              # 2 чисті бари -> озброюємо
+            a = float(atr(df, STOP_ATR).iloc[-1])
+            D = max(abs(p["entry"] - p["zb"]), FVG_FLOOR * a)
+            sgn = 1 if p["side"] == "long" else -1
+            p["stop"] = p["entry"] - sgn * D; p["target"] = p["entry"] + sgn * RR * D
+            eq = equity_now(ex, st)
+            qty = valid_size(ex, symbol, position_qty(eq, p["entry"], p["stop"]), p["entry"])
+            if not qty:
+                st["pos"].pop(symbol)
+                print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі"); return
+            p["qty"] = qty; p["status"] = "pending"; p["placed"] = False
+            if NOTIFY_TRADES:
+                tg(f"⏳ Лімітка озброєна {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
+                   f"(50% зони; стоп {p['stop']:.4f} / тейк {p['target']:.4f}, ризик {RISK_PCT*100:.1f}%)")
+        return                                        # філи можливі лише з НАСТУПНОГО бара
+    # --- pending ---
+    if p["bars_waited"] >= FVG_EXPIRY:                # 20 барів від формування -> знято
+        if not DRY_RUN and p.get("placed"): cancel_symbol_orders(ex, symbol)
         st["pos"].pop(symbol)
-        if NOTIFY_TRADES:
-            emo = "✅" if r > 0 else "❌"
-            tg(f"{emo} <b>Закрито {symbol} {p['side'].upper()}</b> ({p['engine']}) — {reason}\n"
-               f"R {r:+.2f} | PnL {pnl:+.2f} USDT | депозит {st['equity']:.2f}")
+        if NOTIFY_TRADES: tg(f"🚫 Лімітку знято {symbol} — не зайшло за {FVG_EXPIRY} барів")
+        return
+    cond = fvg_conditions_ok(df, p["side"])
+    if DRY_RUN:
+        if touched:
+            if cond:
+                p["status"] = "in_pos"; p["no_tgt_bar"] = str(bar_dt)
+                if NOTIFY_TRADES:
+                    tg(f"📥 Лімітка зайшла {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
+                       f"(стоп {p['stop']:.4f} / тейк {p['target']:.4f})")
+                hit_stop = bar_l <= p["stop"] if p["side"] == "long" else bar_h >= p["stop"]
+                if hit_stop:                          # той самий бар: лише СТОП (тейк — з наступного)
+                    paper_close(st, symbol, p, "stop", p["stop"], bar_dt)
+            else:
+                st["pos"].pop(symbol)
+                if NOTIFY_TRADES: tg(f"🚫 FVG {symbol}: ретест без тренду/ADX≥20 — сетап згорів")
+        return
+    # live/demo: тримаємо ордер на книзі лише коли умови ок
+    if cond and not p.get("placed"):
+        try:
+            q = float(ex.amount_to_precision(symbol, p["qty"]))
+            side = "buy" if p["side"] == "long" else "sell"
+            pr = float(ex.price_to_precision(symbol, p["entry"]))
+            oid = ex.create_order(symbol, "limit", side, q, pr, {"timeInForce": "GTX"}).get("id")
+            p.setdefault("ids", {})["entry"] = oid; p["placed"] = True
+        except Exception as e:
+            print("fvg place", symbol, e)
+    elif not cond and p.get("placed"):
+        cancel_symbol_orders(ex, symbol)
+        p.setdefault("ids", {}).pop("entry", None); p["placed"] = False
 
 # ----------------------------- ОБРОБКА ОДНОГО БАРА ---------------------------
 def handle_symbol(ex, st, symbol, df):
-    bar = {"i": len(df) - 1, "dt": df["dt"].iloc[-1],
-           "high": df["high"].iloc[-1], "low": df["low"].iloc[-1]}
-    if DRY_RUN: dry_fill_and_manage(st, symbol, bar)     # спершу ведемо відкриті
-    if symbol in st["pos"]:                               # одна позиція на монету
+    p = st["pos"].get(symbol)
+    if p and p.get("status") in ("in_pos", "live"):       # реальна позиція тримає слот
         return
     cands = detect(df, COINS[symbol])
     if not cands: return
-    cand = cands[0]                                       # перший сигнал бере слот
+    # KC-маркет перехоплює слот у НЕспрацьованої FVG-лімітки (як у бектесті:
+    # позицію бере той, хто реально зайшов перший; лімітка ще не зайшла)
+    if p:
+        kc = next((c for c in cands if c["typ"] == "market"), None)
+        if kc is None: return
+        if not DRY_RUN and p.get("placed"): cancel_symbol_orders(ex, symbol)
+        st["pos"].pop(symbol, None)
+        cand = kc
+        if NOTIFY_TRADES: tg(f"↪️ KC перехоплює слот {symbol} (FVG-лімітку знято)")
+    else:
+        cand = cands[0]                                   # перший сигнал бере слот
+    if cand["typ"] == "arm":                              # FVG-пакет: спершу фаза watch
+        st["pos"][symbol] = dict(status="watch", engine="FVG", side=cand["side"],
+                                 entry=cand["entry"], zb=cand["zb"],
+                                 bars_waited=0, adx=cand.get("adx"))
+        if NOTIFY_TRADES:
+            axv = cand.get("adx")
+            tg(f"🕐 FVG {symbol} {cand['side'].upper()}: зона сформована, лімітка на 50% "
+               f"({cand['entry']:.4f}) озброїться через {FVG_WAIT} бари"
+               + (f" | ADX {axv:.1f}" if axv is not None else ""))
+        return
     eq = equity_now(ex, st)
     qty = position_qty(eq, cand["entry"], cand["stop"])
     qty = valid_size(ex, symbol, qty, cand["entry"])      # мінімуми біржі: краще пропустити, ніж оверризик
@@ -488,23 +584,14 @@ def run_once(ex, st, force_report=False):
             continue   # бар не новий -> НІЧОГО (управляємо лише на закритті НОВИХ барів,
                        # інакше фантомні філи проти бару формування)
         st["last_bar"][symbol] = last
-        # новий бар: expiry невиконаної лімітки на testnet/live
-        if not DRY_RUN and st["pos"].get(symbol, {}).get("status") == "pending":
-            p = st["pos"][symbol]; p["bars_waited"] = p.get("bars_waited", 0) + 1
-            if p["bars_waited"] >= FVG_EXPIRY:
-                cancel_symbol_orders(ex, symbol); st["pos"].pop(symbol)
-                if NOTIFY_TRADES: tg(f"🚫 Лімітку скасовано {symbol} — не зайшло за {FVG_EXPIRY} барів")
-                continue
-        if halted:                       # стоп-вхід, але відкриті ведемо
-            if DRY_RUN: handle_symbol_manage_only(st, symbol, df)
+        step_fvg_slot(ex, st, symbol, df)      # FVG-пакет: watch/pending -> філ/зняття
+        if DRY_RUN:
+            bar = {"dt": df["dt"].iloc[-1], "high": df["high"].iloc[-1], "low": df["low"].iloc[-1]}
+            dry_fill_and_manage(st, symbol, bar)   # ведення відкритої позиції
+        if halted:                       # стоп-вхід, але відкриті ведемо (вище)
             continue
         handle_symbol(ex, st, symbol, df)
     save_state(st)
-
-def handle_symbol_manage_only(st, symbol, df):
-    bar = {"i": len(df) - 1, "dt": df["dt"].iloc[-1],
-           "high": df["high"].iloc[-1], "low": df["low"].iloc[-1]}
-    dry_fill_and_manage(st, symbol, bar)
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
@@ -549,53 +636,67 @@ def main():
 # ----------------------------- ОФЛАЙН SELF-TEST -----------------------------
 def selftest():
     """Прогін стратегії бота на локальних CSV (без біржі) — перевірка правильності логіки."""
-    print("\n=== SELF-TEST (офлайн, локальні дані) ===")
-    files = {"BTC/USDT": "quant/data/btc_15m.csv", "ETH/USDT": "quant/data/eth_4h.csv",
-             "SOL/USDT": "quant/data/sol_4h.csv", "BNB/USDT": "quant/data/bnb_4h.csv"}
-    st = {"equity": START_EQUITY, "trades": [], "pos": {}}
+    print("\n=== SELF-TEST (офлайн, локальні дані, FVG-пакет) ===")
+    files = {"ETH/USDT": "quant/data/eth_4h.csv", "SOL/USDT": "quant/data/sol_4h.csv",
+             "BTC/USDT*": "quant/data/btc_15m.csv"}    # BTC* — референс, не торгується
     for symbol, path in files.items():
         if not os.path.exists(path):
             print(f"  {symbol}: немає {path}, пропуск"); continue
         raw = pd.read_csv(path)
-        # BTC файл 15m -> ресемпл у 4h
         raw["dt"] = pd.to_datetime(raw["ts"], unit="ms", utc=True)
         d = raw.set_index("dt")
         if "btc_15m" in path:
             d = d.resample("4h").agg({"open": "first", "high": "max", "low": "min",
                                       "close": "last"}).dropna()
         d = d.reset_index()
-        eng = COINS[symbol]; pos = None; trades = []
-        # подієвий прогін бар-за-баром
+        eng = COINS.get(symbol, ["KC", "FVG"])
+        pos = None; trades = []
         for i in range(EMA_TREND + 5, len(d)):
-            sub = d.iloc[:i + 1]
-            bar = d.iloc[i]
-            if pos:  # ведемо відкриту
-                if pos["status"] == "pending":
-                    hit = bar["low"] <= pos["entry"] if pos["side"] == "long" else bar["high"] >= pos["entry"]
-                    if hit: pos["status"] = "in_pos"
-                    elif i >= pos["expiry_i"]: pos = None
-                if pos and pos["status"] == "in_pos":
-                    if pos["side"] == "long":
-                        ex_ = pos["stop"] if bar["low"] <= pos["stop"] else (pos["target"] if bar["high"] >= pos["target"] else None)
-                    else:
-                        ex_ = pos["stop"] if bar["high"] >= pos["stop"] else (pos["target"] if bar["low"] <= pos["target"] else None)
-                    if ex_ is not None:
-                        r = (ex_ - pos["entry"]) / (pos["entry"] - pos["stop"]) if pos["side"] == "long" \
-                            else (pos["entry"] - ex_) / (pos["stop"] - pos["entry"])
-                        trades.append(r); pos = None
+            sub = d.iloc[:i + 1]; bar = d.iloc[i]
+            if pos and pos["status"] == "watch":
+                pos["w"] += 1
+                touched = bar["low"] <= pos["entry"] if pos["side"] == "long" else bar["high"] >= pos["entry"]
+                if touched: pos = None                       # wait>2: ранній ретест = згорів
+                elif pos["w"] >= FVG_WAIT:
+                    a = float(atr(sub, STOP_ATR).iloc[-1])
+                    D = max(abs(pos["entry"] - pos["zb"]), FVG_FLOOR * a)
+                    sgn = 1 if pos["side"] == "long" else -1
+                    pos.update(stop=pos["entry"] - sgn * D, target=pos["entry"] + sgn * RR * D,
+                               status="pending")
+            elif pos and pos["status"] == "pending":
+                pos["w"] += 1
+                if pos["w"] >= FVG_EXPIRY: pos = None
+                else:
+                    touched = bar["low"] <= pos["entry"] if pos["side"] == "long" else bar["high"] >= pos["entry"]
+                    if touched:
+                        if fvg_conditions_ok(sub, pos["side"]):
+                            pos["status"] = "in_pos"; pos["nt"] = i     # тейк лише з наступного бара
+                            hs = bar["low"] <= pos["stop"] if pos["side"] == "long" else bar["high"] >= pos["stop"]
+                            if hs: trades.append(-1.0); pos = None
+                        else:
+                            pos = None                        # ретест без тренду/ADX = згорів
+            elif pos and pos["status"] == "in_pos":
+                if pos["side"] == "long":
+                    hs = bar["low"] <= pos["stop"]; ht = bar["high"] >= pos["target"] and i > pos.get("nt", -1)
+                else:
+                    hs = bar["high"] >= pos["stop"]; ht = bar["low"] <= pos["target"] and i > pos.get("nt", -1)
+                if hs: trades.append(-1.0); pos = None
+                elif ht: trades.append(RR); pos = None
             if pos: continue
             cands = detect(sub, eng)
             if cands:
                 c = cands[0]
-                pos = dict(status=("pending" if c["typ"] == "limit" else "in_pos"),
-                           side=c["side"], entry=c["entry"], stop=c["stop"],
-                           target=c["target"], expiry_i=i + FVG_EXPIRY)
+                if c["typ"] == "arm":
+                    pos = dict(status="watch", side=c["side"], entry=c["entry"], zb=c["zb"], w=0)
+                else:
+                    pos = dict(status="in_pos", side=c["side"], entry=c["entry"],
+                               stop=c["stop"], target=c["target"], nt=-1)
         r = np.array(trades)
         if len(r):
-            print(f"  {symbol:9s}: угод={len(r):4d} exp={r.mean():+.3f}R WR={(r>0).mean()*100:.0f}%")
+            print(f"  {symbol:9s}: угод={len(r):4d} exp={r.mean():+.3f}R (брутто) WR={(r>0).mean()*100:.0f}%")
         else:
             print(f"  {symbol:9s}: 0 угод")
-    print("Очікувано: exp у плюсі (~+0.1..+0.3R) -> логіка бота збігається з бектестом.")
+    print("Очікувано: exp брутто ~+0.2..+0.5R, менше угод ніж раніше (пакет фільтрує).")
 
 if __name__ == "__main__":
     main()
