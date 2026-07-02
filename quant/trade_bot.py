@@ -249,30 +249,44 @@ def reconcile(ex, st):
                 st["pos"][sym] = dict(status="live", side="long" if amt > 0 else "short",
                                       engine="?", entry=float(p.get("entryPrice") or 0),
                                       stop=None, target=None, qty=abs(amt))
+        for sym in COINS:                            # прибрати ОРФАНИ: ордери по монеті без відстеж. позиції
+            if sym not in st["pos"]:
+                cancel_symbol_orders(ex, sym)
         tg(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
     except Exception as e:
         print("reconcile помилка:", e)
 
 # ----------------------------- ВИКОНАННЯ (live) -----------------------------
+def place_protective(ex, symbol, side, qty, stop, target):
+    """reduceOnly-захист: стоп (STOP_MARKET) + тейк (LIMIT, мейкер).
+    ВИКЛИКАТИ ЛИШЕ КОЛИ позиція вже існує — інакше Binance -2022 (ReduceOnly rejected)."""
+    opp = "sell" if side == "long" else "buy"
+    q = float(ex.amount_to_precision(symbol, qty))
+    sp = float(ex.price_to_precision(symbol, stop))
+    tp = float(ex.price_to_precision(symbol, target))
+    ids = {}
+    ids["stop"] = ex.create_order(symbol, "STOP_MARKET", opp, q, None,
+                                  {"stopPrice": sp, "reduceOnly": True}).get("id")
+    ids["tp"] = ex.create_order(symbol, "limit", opp, q, tp, {"reduceOnly": True}).get("id")
+    return ids
+
 def place_live(ex, symbol, cand, qty):
     side = "buy" if cand["side"] == "long" else "sell"
-    opp = "sell" if cand["side"] == "long" else "buy"
     try: ex.set_margin_mode("isolated", symbol)
     except Exception: pass
     try: ex.set_leverage(int(LEV_CAP), symbol)
     except Exception: pass
     q = float(ex.amount_to_precision(symbol, qty)); ids = {}
-    if cand["typ"] == "market":
+    if cand["typ"] == "market":                          # KC: позиція з'являється ОДРАЗУ
         ids["entry"] = ex.create_order(symbol, "market", side, q).get("id")
-    else:  # FVG: пост-онлі лімітка на краю зони
+        try:                                             # захист одразу; як не встигне — доставить poll_live
+            ids.update(place_protective(ex, symbol, cand["side"], q, cand["stop"], cand["target"]))
+        except Exception as e:
+            print("protective(market) відкладено до poll_live:", e)
+    else:                                                # FVG: пост-онлі лімітка, позиції ЩЕ НЕМА
         p = float(ex.price_to_precision(symbol, cand["entry"]))
         ids["entry"] = ex.create_order(symbol, "limit", side, q, p, {"timeInForce": "GTX"}).get("id")
-    # захисні ордери (reduceOnly): стоп = STOP_MARKET, тейк = LIMIT(мейкер)
-    sp = float(ex.price_to_precision(symbol, cand["stop"]))
-    tp = float(ex.price_to_precision(symbol, cand["target"]))
-    ids["stop"] = ex.create_order(symbol, "STOP_MARKET", opp, q, None,
-                                  {"stopPrice": sp, "reduceOnly": True}).get("id")
-    ids["tp"] = ex.create_order(symbol, "limit", opp, q, tp, {"reduceOnly": True}).get("id")
+        # reduceOnly без позиції -> -2022, тож стоп/тейк ставить poll_live КОЛИ лімітка зайде
     return ids
 
 # ---- опитування реальних позицій (testnet/live): філи, закриття, скасування ----
@@ -292,6 +306,16 @@ def cancel_symbol_orders(ex, symbol):
             except Exception: pass
     except Exception: pass
 
+def ensure_protective(ex, symbol, p, amt):
+    """Поставити reduceOnly стоп/тейк, якщо їх ще нема (позиція вже існує)."""
+    if (p.get("ids") or {}).get("stop"): return                     # захист уже стоїть
+    if p.get("stop") is None or p.get("target") is None: return     # reconcile-позиція без рівнів
+    try:
+        prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"])
+        p.setdefault("ids", {}).update(prot)
+    except Exception as e:
+        tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
+
 def poll_live(ex, st):
     """Кожен цикл на testnet/live: детект філа лімітки та закриття позиції -> TG + звільнення слота."""
     if DRY_RUN: return
@@ -299,12 +323,15 @@ def poll_live(ex, st):
         p = st["pos"][symbol]
         amt = live_pos_amt(ex, symbol)
         if p.get("status") == "pending":
-            if amt > 0:                                   # лімітка виконалась
+            if amt > 0:                                   # лімітка виконалась -> позиція існує
                 p["status"] = "in_pos"
+                ensure_protective(ex, symbol, p, amt)     # ТЕПЕР ставимо reduceOnly стоп/тейк
                 if NOTIFY_TRADES:
                     tg(f"📥 Філ {symbol} {p['side'].upper()} @ ~{p.get('entry',0):.4f} "
                        f"(стоп {p.get('stop',0):.4f} / тейк {p.get('target',0):.4f})")
         elif p.get("status") in ("in_pos", "live"):
+            if amt > 0:
+                ensure_protective(ex, symbol, p, amt)     # підстраховка: позиція є, а захисту нема
             if amt == 0:                                  # позиція закрилась на біржі
                 open_ids = set()
                 try: open_ids = {o["id"] for o in with_retry(ex.fetch_open_orders, symbol)}
@@ -410,6 +437,8 @@ def handle_symbol(ex, st, symbol, df):
                                      ids=ids, bars_waited=0, adx=axv)
             if NOTIFY_TRADES: tg("✅ " + msg)
         except Exception as e:
+            cancel_symbol_orders(ex, symbol)         # прибрати завислий вхідний ордер, якщо вхід частково впав
+            st["pos"].pop(symbol, None)
             tg(f"⚠️ помилка ордера {symbol}: {e}")
 
 # ----------------------------- KILL-SWITCH + ЗВІТ ---------------------------
