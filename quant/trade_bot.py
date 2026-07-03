@@ -162,7 +162,9 @@ def load_state():
         stale = []
         for sym in list(st.get("pos", {}).keys()):
             p = st["pos"][sym]
-            if p.get("engine") == "FVG" and p.get("status") in ("watch", "pending") and "zb" not in p:
+            old_fvg = p.get("engine") == "FVG" and p.get("status") in ("watch", "pending") and "zb" not in p
+            not_traded = sym not in COINS         # монета з минулої епохи (BNB, BTC) -> прибрати слот
+            if old_fvg or not_traded:
                 st["pos"].pop(sym); stale.append(sym)
         if stale: st["_stale"] = sorted(set(st.get("_stale", []) + stale))
         return st
@@ -220,14 +222,19 @@ MIN_FALLBACK = {
 }
 _MARKETS_OK = False
 SYM_MAP = {}                                     # 'ETH/USDT' -> реальний ccxt-символ ('ETH/USDT:USDT')
+_ALL_MARKETS = set()                             # усі символи ринків (для лінивої резолюції БУДЬ-ЯКОЇ монети)
 
 def _norm(s):
     """нормалізація символу перпа: 'ETH/USDT:USDT' -> 'ETH/USDT' (для порівнянь)."""
     return (s or "").split(":")[0]
 
 def M(symbol):
-    """символ для API-викликів ccxt (нові версії кличуть перпи 'X/USDT:USDT')."""
-    return SYM_MAP.get(symbol, symbol)
+    """символ для API-викликів ccxt (нові версії кличуть перпи 'X/USDT:USDT').
+    Резолвить БУДЬ-ЯКУ монету (не лише зі списку) -> старі слоти не мапляться на голий символ."""
+    if symbol in SYM_MAP: return SYM_MAP[symbol]
+    if ":" not in symbol and (symbol + ":USDT") in _ALL_MARKETS:
+        SYM_MAP[symbol] = symbol + ":USDT"; return SYM_MAP[symbol]
+    return symbol
 
 def with_retry(fn, *a, tries=4, **k):
     for i in range(tries):
@@ -238,9 +245,10 @@ def with_retry(fn, *a, tries=4, **k):
             time.sleep(2 ** i)
 
 def load_markets_safe(ex):
-    global _MARKETS_OK
+    global _MARKETS_OK, _ALL_MARKETS
     try:
         ex.load_markets(); _MARKETS_OK = True
+        _ALL_MARKETS = set(ex.markets)
         for s in COINS:                          # резолв реальних символів перпів
             for cand in (s, s + ":USDT"):
                 if cand in ex.markets: SYM_MAP[s] = cand; break
@@ -286,9 +294,18 @@ def reconcile(ex, st):
         for sym in COINS:                            # прибрати ОРФАНИ: ордери по монеті без відстеж. позиції
             if sym not in st["pos"]:
                 cancel_symbol_orders(ex, sym)
-        for sym in st.pop("_stale", []):             # ордери знятих при міграції слотів (у т.ч. поза COINS)
-            if sym not in st["pos"]:
-                cancel_symbol_orders(ex, sym)
+        for sym in st.pop("_stale", []):             # монети з минулих епох: зняти ордери І закрити позицію
+            if sym in st["pos"]: continue
+            cancel_symbol_orders(ex, sym)
+            signed = live_pos_signed(ex, sym)
+            if signed != 0:
+                try:
+                    side = "sell" if signed > 0 else "buy"
+                    q = float(ex.amount_to_precision(M(sym), abs(signed)))
+                    ex.create_order(M(sym), "market", side, q, None, {"reduceOnly": True})
+                    tg(f"🧹 Прибрано залишок минулої епохи: {sym} закрито ({q}), ордери знято")
+                except Exception as e:
+                    print("stale close", sym, e)
         tg(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
     except Exception as e:
         print("reconcile помилка:", e)
@@ -406,8 +423,8 @@ def ensure_protective(ex, symbol, p, amt):
     missing = {}
     if not stops: missing["stop"] = True
     if not tps: missing["tp"] = True
-    if not missing:
-        p["prot_tries"] = 0                          # ноги на місці -> лічильник спроб обнуляємо
+    if not missing:                                  # обидві ноги на місці -> повне відновлення
+        for k in ("prot_tries", "prot_gaveup", "prot_warn"): p.pop(k, None)
         return
     if p.get("prot_tries", 0) >= 3:                  # 3 невдалі доставки -> стоп, не спамимо ордерами
         if not p.get("prot_gaveup"):
