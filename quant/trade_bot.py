@@ -26,6 +26,8 @@
   python trade_bot.py report    # надіслати щоденний звіт зараз
   python trade_bot.py balance   # діагностика: показати баланс і куди йдуть запити
   python trade_bot.py close SOL/USDT   # закрити позицію+ордери по монеті (або: close all)
+  python trade_bot.py protect ETH/USDT 1686 1853   # почепити стоп/тейк на живу позицію
+  python trade_bot.py preflight # перевірка контракту з біржею (після кожного git pull!)
   python trade_bot.py selftest  # офлайн-перевірка логіки на локальних CSV (без біржі)
 
 ЗМІННІ ОТОЧЕННЯ:
@@ -439,6 +441,38 @@ def close_command(ex, st, target):
     save_state(st)
     print("close: готово.", "Слоти:", list(st["pos"].keys()) or "порожньо")
 
+ENTRIES_ENABLED = True                       # preflight може вимкнути НОВІ входи (відкриті ведемо)
+
+def preflight(ex):
+    """Перевірка контракту з біржею на старті live: все, що вже ламалось.
+    Провал -> TG-алерт і блок НОВИХ входів (відкриті позиції ведемо далі)."""
+    probs = []
+    for s in COINS:
+        if s not in SYM_MAP: probs.append(f"символ не зрезолвлено: {s}")
+    try:
+        for r_ in (ex.fetch_positions() or [])[:5]:
+            sym = r_.get("symbol") or ""
+            if sym and _norm(sym) not in COINS and ":" in sym and _norm(sym) == sym:
+                probs.append(f"нормалізація символу не працює: {sym}")
+    except Exception as e:
+        probs.append(f"fetch_positions падає: {e}")
+    for s in COINS:
+        if open_order_ids(ex, s) is None:
+            probs.append(f"fetch_open_orders падає: {s}")
+        try:
+            float(ex.amount_to_precision(M(s), 1.2345)); float(ex.price_to_precision(M(s), 123.456))
+        except Exception as e:
+            probs.append(f"precision {s}: {e}")
+    try:
+        float(ex.fetch_balance()["USDT"]["total"])
+    except Exception as e:
+        probs.append(f"fetch_balance: {e}")
+    if probs:
+        tg("⛔ <b>PREFLIGHT провалено</b> — нові входи ВИМКНЕНО до фіксу:\n" + "\n".join(f"• {p}" for p in probs))
+        return False
+    print("preflight: OK (символи/позиції/ордери/precision/баланс)")
+    return True
+
 def poll_live(ex, st):
     """Кожен цикл на testnet/live: філи лімовок і закриття позицій.
     АНТИФАНТОМ: закриття оголошується лише після 2 ПОСПІЛЬ читань amt==0 І якщо
@@ -597,6 +631,8 @@ def step_fvg_slot(ex, st, symbol, df):
 
 # ----------------------------- ОБРОБКА ОДНОГО БАРА ---------------------------
 def handle_symbol(ex, st, symbol, df):
+    if not ENTRIES_ENABLED:                               # preflight провалено -> нових входів нема
+        return
     p = st["pos"].get(symbol)
     if p and p.get("status") in ("in_pos", "live"):       # реальна позиція тримає слот
         return
@@ -739,6 +775,8 @@ def main():
         except Exception as e:
             print("❌ fetch_balance:", repr(e))
         return
+    if mode == "preflight":
+        return print("PREFLIGHT:", "OK ✅" if preflight(ex) else "ПРОВАЛЕНО ⛔ (див. вище)")
     if mode == "close":
         return close_command(ex, st, sys.argv[2] if len(sys.argv) > 2 else "all")
     if mode == "protect":                    # protect SYMBOL STOP TARGET — почепити захист на живу позицію
@@ -776,7 +814,10 @@ def main():
     if mode == "report":
         daily_report(st, equity_now(ex, st)); return
     # mode == run: цикл
-    tg(f"🤖 Бот запущено ({banner})")
+    global ENTRIES_ENABLED
+    if not DRY_RUN:
+        ENTRIES_ENABLED = preflight(ex)          # контракт з біржею; провал -> без нових входів
+    tg(f"🤖 Бот запущено ({banner})" + ("" if ENTRIES_ENABLED else " ⛔ входи вимкнено (preflight)"))
     last_report_day = ""
     while True:
         try:
