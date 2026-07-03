@@ -385,6 +385,19 @@ def ensure_protective(ex, symbol, p, amt):
     stops = [o for o in ro if has_trigger(o)]
     tps = [o for o in ro if not has_trigger(o)]
     ids = p.setdefault("ids", {})
+    # ЗАПОБІЖНИК: reduceOnly-ордерів явно забагато -> зносимо ВСІ і ставимо свіжу пару.
+    # (обмежує наслідки будь-якого майбутнього сюрпризу в форматі відповіді біржі)
+    if len(ro) > 4:
+        print(f"protective {symbol}: {len(ro)} reduceOnly ордерів! зразок:",
+              {k: (ro[0].get(k)) for k in ("id", "type", "stopPrice", "triggerPrice", "reduceOnly")},
+              "info:", (ro[0].get("info", {}) or {}))
+        for o in ro:
+            try: ex.cancel_order(o["id"], M(symbol))
+            except Exception: pass
+        stops = []; tps = []; ids.pop("stop", None); ids.pop("tp", None)
+        if not p.get("prot_purge_note"):
+            tg(f"🧯 {symbol}: знесено {len(ro)} дублікатів захисту, ставлю чисту пару стоп+тейк")
+            p["prot_purge_note"] = True
     for extra in stops[1:] + tps[1:]:                # дублікати від старих циклів -> геть
         try: ex.cancel_order(extra["id"], M(symbol))
         except Exception: pass
@@ -393,8 +406,17 @@ def ensure_protective(ex, symbol, p, amt):
     missing = {}
     if not stops: missing["stop"] = True
     if not tps: missing["tp"] = True
-    if not missing: return                           # обидві ноги реально на біржі
+    if not missing:
+        p["prot_tries"] = 0                          # ноги на місці -> лічильник спроб обнуляємо
+        return
+    if p.get("prot_tries", 0) >= 3:                  # 3 невдалі доставки -> стоп, не спамимо ордерами
+        if not p.get("prot_gaveup"):
+            tg(f"‼️ {symbol}: захист не тримається після 3 спроб — постав руками стоп "
+               f"{p['stop']:.4f} / тейк {p['target']:.4f} і кинь скрін")
+            p["prot_gaveup"] = True
+        return
     try:
+        p["prot_tries"] = p.get("prot_tries", 0) + 1
         have = {k: ids.get(k) for k in ("stop", "tp") if not missing.get(k)}
         prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"],
                                 have={k: True for k in have})
