@@ -186,7 +186,7 @@ def make_exchange():
     return ex
 
 def fetch_closed(ex, symbol, limit=320):
-    o = ex.fetch_ohlcv(symbol, TF, limit=limit)
+    o = ex.fetch_ohlcv(M(symbol), TF, limit=limit)
     df = pd.DataFrame(o, columns=["ts", "open", "high", "low", "close", "vol"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     return df.iloc[:-1].reset_index(drop=True)        # ДРОП незакритого бара
@@ -217,6 +217,15 @@ MIN_FALLBACK = {
     "BNB/USDT": dict(min_cost=5,  min_amt=0.001),
 }
 _MARKETS_OK = False
+SYM_MAP = {}                                     # 'ETH/USDT' -> реальний ccxt-символ ('ETH/USDT:USDT')
+
+def _norm(s):
+    """нормалізація символу перпа: 'ETH/USDT:USDT' -> 'ETH/USDT' (для порівнянь)."""
+    return (s or "").split(":")[0]
+
+def M(symbol):
+    """символ для API-викликів ccxt (нові версії кличуть перпи 'X/USDT:USDT')."""
+    return SYM_MAP.get(symbol, symbol)
 
 def with_retry(fn, *a, tries=4, **k):
     for i in range(tries):
@@ -230,13 +239,17 @@ def load_markets_safe(ex):
     global _MARKETS_OK
     try:
         ex.load_markets(); _MARKETS_OK = True
+        for s in COINS:                          # резолв реальних символів перпів
+            for cand in (s, s + ":USDT"):
+                if cand in ex.markets: SYM_MAP[s] = cand; break
+        print("  символи:", SYM_MAP or "як є")
     except Exception as e:
         print("  load_markets не вдалось (офлайн?) — запасні мінімуми:", e)
 
 def limits_for(ex, symbol):
     if _MARKETS_OK:
         try:
-            lim = ex.market(symbol).get("limits", {})
+            lim = ex.market(M(symbol)).get("limits", {})
             mc = (lim.get("cost", {}) or {}).get("min")
             ma = (lim.get("amount", {}) or {}).get("min")
             if mc or ma:
@@ -250,7 +263,7 @@ def valid_size(ex, symbol, qty, price):
     """Округлення + перевірка мінімумів біржі. None -> угоду ПРОПУСКАЄМО (НЕ оверризик!)."""
     min_cost, min_amt = limits_for(ex, symbol)
     try:
-        qty = float(ex.amount_to_precision(symbol, qty)) if _MARKETS_OK else round(qty, 6)
+        qty = float(ex.amount_to_precision(M(symbol), qty)) if _MARKETS_OK else round(qty, 6)
     except Exception:
         qty = round(qty, 6)
     if qty < (min_amt or 0): return None
@@ -263,7 +276,7 @@ def reconcile(ex, st):
     try:
         for p in with_retry(ex.fetch_positions) or []:
             amt = float(p.get("contracts") or (p.get("info", {}) or {}).get("positionAmt") or 0)
-            sym = p.get("symbol")
+            sym = _norm(p.get("symbol"))                 # 'ETH/USDT:USDT' -> 'ETH/USDT'
             if abs(amt) > 0 and sym in COINS and sym not in st["pos"]:
                 st["pos"][sym] = dict(status="live", side="long" if amt > 0 else "short",
                                       engine="?", entry=float(p.get("entryPrice") or 0),
@@ -279,70 +292,97 @@ def reconcile(ex, st):
         print("reconcile помилка:", e)
 
 # ----------------------------- ВИКОНАННЯ (live) -----------------------------
-def place_protective(ex, symbol, side, qty, stop, target):
-    """reduceOnly-захист: стоп (STOP_MARKET) + тейк (LIMIT, мейкер).
-    ВИКЛИКАТИ ЛИШЕ КОЛИ позиція вже існує — інакше Binance -2022 (ReduceOnly rejected)."""
+def place_protective(ex, symbol, side, qty, stop, target, have=None):
+    """reduceOnly-захист: стоп (STOP_MARKET) + тейк (LIMIT). Ставить ЛИШЕ відсутні ноги
+    (have = вже наявні ids). Кликати коли позиція існує — інакше Binance -2022."""
+    have = have or {}
     opp = "sell" if side == "long" else "buy"
-    q = float(ex.amount_to_precision(symbol, qty))
-    sp = float(ex.price_to_precision(symbol, stop))
-    tp = float(ex.price_to_precision(symbol, target))
+    ms = M(symbol)
+    q = float(ex.amount_to_precision(ms, qty))
     ids = {}
-    ids["stop"] = ex.create_order(symbol, "STOP_MARKET", opp, q, None,
-                                  {"stopPrice": sp, "reduceOnly": True}).get("id")
-    ids["tp"] = ex.create_order(symbol, "limit", opp, q, tp, {"reduceOnly": True}).get("id")
+    if not have.get("stop"):
+        sp = float(ex.price_to_precision(ms, stop))
+        ids["stop"] = ex.create_order(ms, "STOP_MARKET", opp, q, None,
+                                      {"stopPrice": sp, "reduceOnly": True}).get("id")
+    if not have.get("tp"):
+        tp = float(ex.price_to_precision(ms, target))
+        ids["tp"] = ex.create_order(ms, "limit", opp, q, tp, {"reduceOnly": True}).get("id")
     return ids
 
 def place_live(ex, symbol, cand, qty):
     side = "buy" if cand["side"] == "long" else "sell"
-    try: ex.set_margin_mode("isolated", symbol)
+    ms = M(symbol)
+    try: ex.set_margin_mode("isolated", ms)
     except Exception: pass
-    try: ex.set_leverage(int(LEV_CAP), symbol)
+    try: ex.set_leverage(int(LEV_CAP), ms)
     except Exception: pass
-    q = float(ex.amount_to_precision(symbol, qty)); ids = {}
+    q = float(ex.amount_to_precision(ms, qty)); ids = {}
     if cand["typ"] == "market":                          # KC: позиція з'являється ОДРАЗУ
-        ids["entry"] = ex.create_order(symbol, "market", side, q).get("id")
-        try:                                             # захист одразу; як не встигне — доставить poll_live
-            ids.update(place_protective(ex, symbol, cand["side"], q, cand["stop"], cand["target"]))
+        ids["entry"] = ex.create_order(ms, "market", side, q).get("id")
+        try:                                             # захист одразу; недоставлене доставить poll_live
+            ids.update(place_protective(ex, symbol, cand["side"], q, cand["stop"], cand["target"], have=ids))
         except Exception as e:
             print("protective(market) відкладено до poll_live:", e)
     else:                                                # FVG: пост-онлі лімітка, позиції ЩЕ НЕМА
-        p = float(ex.price_to_precision(symbol, cand["entry"]))
-        ids["entry"] = ex.create_order(symbol, "limit", side, q, p, {"timeInForce": "GTX"}).get("id")
+        p = float(ex.price_to_precision(ms, cand["entry"]))
+        ids["entry"] = ex.create_order(ms, "limit", side, q, p, {"timeInForce": "GTX"}).get("id")
         # reduceOnly без позиції -> -2022, тож стоп/тейк ставить poll_live КОЛИ лімітка зайде
     return ids
 
 # ---- опитування реальних позицій (testnet/live): філи, закриття, скасування ----
 def live_pos_amt(ex, symbol):
+    """|позиція| по монеті. None = НЕ ВДАЛОСЬ дізнатись (не плутати з 0!)."""
     try:
-        for pos in with_retry(ex.fetch_positions, [symbol]):
-            if pos.get("symbol") == symbol:
+        try: rows = with_retry(ex.fetch_positions, [M(symbol)])
+        except Exception: rows = with_retry(ex.fetch_positions)      # fallback: всі позиції
+        for pos in rows or []:
+            if _norm(pos.get("symbol")) == symbol:
                 return abs(float(pos.get("contracts") or (pos.get("info", {}) or {}).get("positionAmt") or 0))
+        return 0.0
     except Exception as e:
         print("pos", symbol, e)
-    return 0.0
+        return None
+
+def open_order_ids(ex, symbol):
+    """множина id відкритих ордерів по монеті. None = не вдалось дізнатись."""
+    try:
+        return {o["id"] for o in with_retry(ex.fetch_open_orders, M(symbol))}
+    except Exception as e:
+        print("orders", symbol, e)
+        return None
 
 def cancel_symbol_orders(ex, symbol):
-    try:
-        for o in with_retry(ex.fetch_open_orders, symbol):
-            try: ex.cancel_order(o["id"], symbol)
-            except Exception: pass
-    except Exception: pass
+    ids = open_order_ids(ex, symbol)
+    for oid in ids or []:
+        try: ex.cancel_order(oid, M(symbol))
+        except Exception: pass
 
 def ensure_protective(ex, symbol, p, amt):
-    """Поставити reduceOnly стоп/тейк, якщо їх ще нема (позиція вже існує)."""
-    if (p.get("ids") or {}).get("stop"): return                     # захист уже стоїть
+    """Доставити ВІДСУТНІ ноги захисту (стоп і тейк НЕЗАЛЕЖНО) — позиція вже існує."""
     if p.get("stop") is None or p.get("target") is None: return     # reconcile-позиція без рівнів
+    ids = p.setdefault("ids", {})
+    live = open_order_ids(ex, symbol)
+    if live is not None:                                            # нога зникла з біржі -> ставимо заново
+        for leg in ("stop", "tp"):
+            if ids.get(leg) and ids[leg] not in live: ids.pop(leg, None)
+    if ids.get("stop") and ids.get("tp"): return                    # обидві ноги на місці
     try:
-        prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"])
-        p.setdefault("ids", {}).update(prot)
+        prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"], have=ids)
+        if prot:
+            ids.update(prot)
+            if NOTIFY_TRADES:
+                legs = "+стоп" * ("stop" in prot) + "+тейк" * ("tp" in prot)
+                tg(f"🛡 Доставлено захист {symbol}: {legs}")
     except Exception as e:
         tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
 
 def live_pos_signed(ex, symbol):
     """Позиція зі знаком (+лонг/-шорт), 0 якщо нема."""
     try:
-        for pos in with_retry(ex.fetch_positions, [symbol]):
-            if pos.get("symbol") == symbol:
+        try: rows = with_retry(ex.fetch_positions, [M(symbol)])
+        except Exception: rows = with_retry(ex.fetch_positions)
+        for pos in rows or []:
+            if _norm(pos.get("symbol")) == symbol:
                 raw = (pos.get("info", {}) or {}).get("positionAmt")
                 if raw is not None: return float(raw)
                 amt = abs(float(pos.get("contracts") or 0))
@@ -362,9 +402,9 @@ def close_command(ex, st, target):
         amt = live_pos_signed(ex, sym)
         if amt != 0:
             side = "sell" if amt > 0 else "buy"
-            q = float(ex.amount_to_precision(sym, abs(amt)))
+            q = float(ex.amount_to_precision(M(sym), abs(amt)))
             try:
-                ex.create_order(sym, "market", side, q, None, {"reduceOnly": True})
+                ex.create_order(M(sym), "market", side, q, None, {"reduceOnly": True})
                 tg(f"🧹 Закрито вручну через бота: {sym} ({'LONG' if amt > 0 else 'SHORT'} {q})")
             except Exception as e:
                 print("close", sym, e); tg(f"⚠️ не вдалось закрити {sym}: {e}"); continue
@@ -377,36 +417,57 @@ def close_command(ex, st, target):
     print("close: готово.", "Слоти:", list(st["pos"].keys()) or "порожньо")
 
 def poll_live(ex, st):
-    """Кожен цикл на testnet/live: детект філа лімітки та закриття позиції -> TG + звільнення слота."""
+    """Кожен цикл на testnet/live: філи лімовок і закриття позицій.
+    АНТИФАНТОМ: закриття оголошується лише після 2 ПОСПІЛЬ читань amt==0 І якщо
+    захисні ордери теж зникли (Binance сам знімає reduceOnly, коли позиція закрита)."""
     if DRY_RUN: return
     for symbol in list(st["pos"].keys()):
         p = st["pos"][symbol]
         amt = live_pos_amt(ex, symbol)
+        if amt is None: continue                          # біржа не відповіла -> без висновків
         if p.get("status") == "pending":
             if amt > 0:                                   # лімітка виконалась -> позиція існує
-                p["status"] = "in_pos"
+                p["status"] = "in_pos"; p["zero_polls"] = 0
                 ensure_protective(ex, symbol, p, amt)     # ТЕПЕР ставимо reduceOnly стоп/тейк
                 if NOTIFY_TRADES:
                     tg(f"📥 Філ {symbol} {p['side'].upper()} @ ~{p.get('entry',0):.4f} "
                        f"(стоп {p.get('stop',0):.4f} / тейк {p.get('target',0):.4f})")
         elif p.get("status") in ("in_pos", "live"):
             if amt > 0:
-                ensure_protective(ex, symbol, p, amt)     # підстраховка: позиція є, а захисту нема
-            if amt == 0:                                  # позиція закрилась на біржі
-                open_ids = set()
-                try: open_ids = {o["id"] for o in with_retry(ex.fetch_open_orders, symbol)}
-                except Exception: pass
-                ids = p.get("ids", {})
-                reason = "target" if ids.get("tp") and ids["tp"] not in open_ids else \
-                         ("stop" if ids.get("stop") and ids["stop"] not in open_ids else "?")
-                cancel_symbol_orders(ex, symbol)          # прибрати завислий протилежний ордер
-                r = 2.0 if reason == "target" else (-1.0 if reason == "stop" else 0.0)
-                st["trades"].append(dict(t=str(_utcnow()), sym=symbol, eng=p.get("engine", "?"),
-                                         side=p.get("side"), r=r, pnl=0.0, reason=reason, adx=p.get("adx")))
-                st["pos"].pop(symbol)
-                if NOTIFY_TRADES:
-                    tg(f"{'✅' if r > 0 else '❌'} <b>Закрито {symbol} {str(p.get('side')).upper()}</b> "
-                       f"({p.get('engine','?')}) — {reason} (~{r:+.1f}R)")
+                p["zero_polls"] = 0
+                ensure_protective(ex, symbol, p, amt)     # доставити відсутні ноги захисту
+                continue
+            # amt == 0: або закрито, або збій читання -> перевіряємо і чекаємо підтвердження
+            ids = p.get("ids", {})
+            open_ids = open_order_ids(ex, symbol)
+            prot = [ids[k] for k in ("stop", "tp") if ids.get(k)]
+            if open_ids is not None and prot and any(i in open_ids for i in prot):
+                p["zero_polls"] = 0; continue             # захист живий -> позиція існує (збій читання)
+            p["zero_polls"] = p.get("zero_polls", 0) + 1
+            if p["zero_polls"] < 2:
+                continue                                  # перше нульове читання -> ще раз за хвилину
+            # причина закриття — за СТАТУСОМ ордера (біржа сама знімає другу ногу, тому
+            # «ордер зник» не означає «спрацював»; питаємо, чи був ВИКОНАНИЙ)
+            def _filled(oid):
+                try:
+                    o = ex.fetch_order(oid, M(symbol))
+                    return o.get("status") == "closed" or float(o.get("filled") or 0) > 0
+                except Exception:
+                    return None
+            reason = "?"
+            if ids.get("tp") and _filled(ids["tp"]): reason = "target"
+            elif ids.get("stop") and _filled(ids["stop"]): reason = "stop"
+            elif open_ids is not None:                    # запасна евристика, як раніше
+                if ids.get("tp") and ids["tp"] not in open_ids: reason = "target"
+                elif ids.get("stop") and ids["stop"] not in open_ids: reason = "stop"
+            cancel_symbol_orders(ex, symbol)              # прибрати завислий протилежний ордер
+            r = 2.0 if reason == "target" else (-1.0 if reason == "stop" else 0.0)
+            st["trades"].append(dict(t=str(_utcnow()), sym=symbol, eng=p.get("engine", "?"),
+                                     side=p.get("side"), r=r, pnl=0.0, reason=reason, adx=p.get("adx")))
+            st["pos"].pop(symbol)
+            if NOTIFY_TRADES:
+                tg(f"{'✅' if r > 0 else '❌'} <b>Закрито {symbol} {str(p.get('side')).upper()}</b> "
+                   f"({p.get('engine','?')}) — {reason} (~{r:+.1f}R)")
 
 # ----------------------------- DRY-RUN симуляція фолу -----------------------
 def paper_close(st, symbol, p, reason, px, bar_dt):
@@ -499,10 +560,11 @@ def step_fvg_slot(ex, st, symbol, df):
     # live/demo: тримаємо ордер на книзі лише коли умови ок
     if cond and not p.get("placed"):
         try:
-            q = float(ex.amount_to_precision(symbol, p["qty"]))
+            ms = M(symbol)
+            q = float(ex.amount_to_precision(ms, p["qty"]))
             side = "buy" if p["side"] == "long" else "sell"
-            pr = float(ex.price_to_precision(symbol, p["entry"]))
-            oid = ex.create_order(symbol, "limit", side, q, pr, {"timeInForce": "GTX"}).get("id")
+            pr = float(ex.price_to_precision(ms, p["entry"]))
+            oid = ex.create_order(ms, "limit", side, q, pr, {"timeInForce": "GTX"}).get("id")
             p.setdefault("ids", {})["entry"] = oid; p["placed"] = True
         except Exception as e:
             print("fvg place", symbol, e)
@@ -656,6 +718,19 @@ def main():
         return
     if mode == "close":
         return close_command(ex, st, sys.argv[2] if len(sys.argv) > 2 else "all")
+    if mode == "positions":                  # діагностика: сирі позиції/ордери з біржі
+        try:
+            for pos in ex.fetch_positions() or []:
+                amt = float(pos.get("contracts") or (pos.get("info", {}) or {}).get("positionAmt") or 0)
+                if abs(amt) > 0:
+                    print(f"POS {pos.get('symbol')} (норм: {_norm(pos.get('symbol'))}) amt={amt} "
+                          f"entry={pos.get('entryPrice')}")
+        except Exception as e:
+            print("fetch_positions:", repr(e))
+        for sym in COINS:
+            print(f"ORDERS {sym}: {open_order_ids(ex, sym)}")
+        print("Слоти бота:", {k: v.get('status') for k, v in st['pos'].items()} or "порожньо")
+        return
     reconcile(ex, st)
     if mode == "once":
         run_once(ex, st); daily_report(st, equity_now(ex, st)); return
