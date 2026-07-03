@@ -625,21 +625,25 @@ def step_fvg_slot(ex, st, symbol, df):
             st["pos"].pop(symbol)
             if NOTIFY_TRADES: tg(f"🚫 FVG {symbol}: ретест у перші {FVG_WAIT} бари — сетап згорів")
             return
-        if p["bars_waited"] >= FVG_WAIT:              # 2 чисті бари -> озброюємо
-            a = float(atr(df, STOP_ATR).iloc[-1])
-            D = max(abs(p["entry"] - p["zb"]), FVG_FLOOR * a)
-            sgn = 1 if p["side"] == "long" else -1
-            p["stop"] = p["entry"] - sgn * D; p["target"] = p["entry"] + sgn * RR * D
-            eq = equity_now(ex, st)
-            qty = valid_size(ex, symbol, position_qty(eq, p["entry"], p["stop"]), p["entry"])
-            if not qty:
-                st["pos"].pop(symbol)
-                print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі"); return
-            p["qty"] = qty; p["status"] = "pending"; p["placed"] = False
-            if NOTIFY_TRADES:
-                tg(f"⏳ Лімітка озброєна {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
-                   f"(50% зони; стоп {p['stop']:.4f} / тейк {p['target']:.4f}, ризик {RISK_PCT*100:.1f}%)")
-        return                                        # філи можливі лише з НАСТУПНОГО бара
+        if p["bars_waited"] < FVG_WAIT:               # ще чекаємо чисті бари
+            return
+        # 2 чисті бари -> ОЗБРОЄННЯ (рахуємо рівні/розмір; touched тут завжди False)
+        a = float(atr(df, STOP_ATR).iloc[-1])
+        D = max(abs(p["entry"] - p["zb"]), FVG_FLOOR * a)
+        sgn = 1 if p["side"] == "long" else -1
+        p["stop"] = p["entry"] - sgn * D; p["target"] = p["entry"] + sgn * RR * D
+        eq = equity_now(ex, st)
+        qty = valid_size(ex, symbol, position_qty(eq, p["entry"], p["stop"]), p["entry"])
+        if not qty:
+            st["pos"].pop(symbol)
+            print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі"); return
+        p["qty"] = qty; p["status"] = "pending"; p["placed"] = False
+        if NOTIFY_TRADES:
+            tg(f"⏳ Лімітка озброєна {symbol} {p['side'].upper()} @ {p['entry']:.4f} "
+               f"(50% зони; стоп {p['stop']:.4f} / тейк {p['target']:.4f}, ризик {RISK_PCT*100:.1f}%)")
+        # НЕ повертаємось: далі (live) виставляємо лімітку ЦЬОГО ж бару, щоб вона стояла
+        # на книзі вже наступного бару (fill з k+3, як у бектесті). У DRY нижче touched=False,
+        # тож філ цього бару не станеться — філи з наступного бару.
     # --- pending ---
     if p["bars_waited"] >= FVG_EXPIRY:                # 20 барів від формування -> знято
         if not DRY_RUN and p.get("placed"): cancel_symbol_orders(ex, symbol)
