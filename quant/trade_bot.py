@@ -718,6 +718,22 @@ def main():
         return
     if mode == "close":
         return close_command(ex, st, sys.argv[2] if len(sys.argv) > 2 else "all")
+    if mode == "protect":                    # protect SYMBOL STOP TARGET — почепити захист на живу позицію
+        sym = sys.argv[2]; sp = float(sys.argv[3]); tp = float(sys.argv[4])
+        signed = live_pos_signed(ex, sym); amt = abs(signed)
+        if amt <= 0:
+            print(f"{sym}: позиції на біржі нема"); return
+        side = "long" if signed > 0 else "short"
+        ok = (sp < tp) if side == "long" else (sp > tp)
+        if not ok:
+            print(f"помилка: для {side} стоп має бути {'нижче' if side=='long' else 'вище'} тейка"); return
+        p = st["pos"].setdefault(sym, dict(engine="?", qty=amt))
+        p.update(status="in_pos", side=side, stop=sp, target=tp, qty=amt, zero_polls=0)
+        p.setdefault("entry", 0)
+        ensure_protective(ex, sym, p, amt)
+        save_state(st)
+        print(f"{sym} {side} amt={amt}: стоп {sp} / тейк {tp} | ордери: {p.get('ids')}")
+        return
     if mode == "positions":                  # діагностика: сирі позиції/ордери з біржі
         try:
             for pos in ex.fetch_positions() or []:
