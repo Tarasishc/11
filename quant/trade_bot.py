@@ -358,23 +358,46 @@ def cancel_symbol_orders(ex, symbol):
         except Exception: pass
 
 def ensure_protective(ex, symbol, p, amt):
-    """Доставити ВІДСУТНІ ноги захисту (стоп і тейк НЕЗАЛЕЖНО) — позиція вже існує."""
+    """Захист позиції за ФАКТИЧНИМ станом біржі (не за збереженими id):
+    reduceOnly STOP_MARKET = нога стопа, reduceOnly LIMIT = нога тейка.
+    Наявні ноги приймаємо, ДУБЛІКАТИ знімаємо, відсутнє ставимо. TG — раз на позицію."""
     if p.get("stop") is None or p.get("target") is None: return     # reconcile-позиція без рівнів
-    ids = p.setdefault("ids", {})
-    live = open_order_ids(ex, symbol)
-    if live is not None:                                            # нога зникла з біржі -> ставимо заново
-        for leg in ("stop", "tp"):
-            if ids.get(leg) and ids[leg] not in live: ids.pop(leg, None)
-    if ids.get("stop") and ids.get("tp"): return                    # обидві ноги на місці
     try:
-        prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"], have=ids)
-        if prot:
-            ids.update(prot)
-            if NOTIFY_TRADES:
-                legs = "+стоп" * ("stop" in prot) + "+тейк" * ("tp" in prot)
-                tg(f"🛡 Доставлено захист {symbol}: {legs}")
+        orders = with_retry(ex.fetch_open_orders, M(symbol))
     except Exception as e:
-        tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
+        print("orders", symbol, e); return          # стан невідомий -> нічого не робимо (без спаму)
+    def is_ro(o):
+        v = o.get("reduceOnly")
+        if v is None: v = (o.get("info", {}) or {}).get("reduceOnly")
+        return v in (True, "true", "True")
+    def otype(o): return (o.get("type") or "").upper()
+    ro = [o for o in orders if is_ro(o)]
+    stops = [o for o in ro if "STOP" in otype(o) or "TAKE_PROFIT" in otype(o)]
+    tps = [o for o in ro if otype(o) == "LIMIT"]
+    ids = p.setdefault("ids", {})
+    for extra in stops[1:] + tps[1:]:                # дублікати від старих циклів -> геть
+        try: ex.cancel_order(extra["id"], M(symbol))
+        except Exception: pass
+    if stops: ids["stop"] = stops[0]["id"]
+    if tps: ids["tp"] = tps[0]["id"]
+    missing = {}
+    if not stops: missing["stop"] = True
+    if not tps: missing["tp"] = True
+    if not missing: return                           # обидві ноги реально на біржі
+    try:
+        have = {k: ids.get(k) for k in ("stop", "tp") if not missing.get(k)}
+        prot = place_protective(ex, symbol, p["side"], amt, p["stop"], p["target"],
+                                have={k: True for k in have})
+        for k, v in (prot or {}).items(): ids[k] = v
+        if prot and not p.get("prot_note") and NOTIFY_TRADES:
+            legs = "+стоп" * ("stop" in prot) + "+тейк" * ("tp" in prot)
+            tg(f"🛡 Доставлено захист {symbol}: {legs}")
+            p["prot_note"] = True                    # один раз на позицію, без спаму
+    except Exception as e:
+        print("protective", symbol, e)
+        if not p.get("prot_warn"):
+            tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
+            p["prot_warn"] = True
 
 def live_pos_signed(ex, symbol):
     """Позиція зі знаком (+лонг/-шорт), 0 якщо нема."""
