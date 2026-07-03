@@ -372,10 +372,18 @@ def ensure_protective(ex, symbol, p, amt):
         v = o.get("reduceOnly")
         if v is None: v = (o.get("info", {}) or {}).get("reduceOnly")
         return v in (True, "true", "True")
-    def otype(o): return (o.get("type") or "").upper()
+    def has_trigger(o):
+        """ccxt уніфікує STOP_MARKET у type='market' -> розпізнаємо ногу стопа за
+        НАЯВНІСТЮ тригер-ціни, а не за назвою типу."""
+        for v in (o.get("stopPrice"), o.get("triggerPrice"), (o.get("info", {}) or {}).get("stopPrice")):
+            try:
+                if v not in (None, "") and float(v) > 0: return True
+            except (TypeError, ValueError):
+                pass
+        return False
     ro = [o for o in orders if is_ro(o)]
-    stops = [o for o in ro if "STOP" in otype(o) or "TAKE_PROFIT" in otype(o)]
-    tps = [o for o in ro if otype(o) == "LIMIT"]
+    stops = [o for o in ro if has_trigger(o)]
+    tps = [o for o in ro if not has_trigger(o)]
     ids = p.setdefault("ids", {})
     for extra in stops[1:] + tps[1:]:                # дублікати від старих циклів -> геть
         try: ex.cancel_order(extra["id"], M(symbol))
