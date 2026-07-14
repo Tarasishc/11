@@ -67,6 +67,7 @@ RR          = 2.0
 LEV_CAP     = 5.0
 REPORT_HOUR_UTC = int(os.getenv("BOT_REPORT_HOUR", "8"))      # година UTC для звіту
 NOTIFY_TRADES = os.getenv("BOT_NOTIFY_TRADES", "1") == "1"    # 1=слати кожну угоду (вхід/вихід)
+SIGNALS_ONLY  = os.getenv("BOT_SIGNALS_ONLY", "0") == "1"     # 1=ЛИШЕ 📥вхід/✅❌вихід (ручна торгівля)
 STATE_FILE  = os.getenv("BOT_STATE", "bot_state.json")
 
 # монета -> які двигуни; ccxt-символ Binance USDM
@@ -152,6 +153,11 @@ def tg(msg):
                                    data=data, timeout=15)
         except Exception as e:
             print(f"  TG помилка ({cid}):", e)
+
+def note(msg):
+    """Проміжні/службові повідомлення (зона, озброєння, згоріло, захист) —
+    глушаться в режимі SIGNALS_ONLY, щоб лишались ЛИШЕ вхід/вихід."""
+    if not SIGNALS_ONLY: tg(msg)
 
 # ----------------------------- СТАН -----------------------------------------
 def load_state():
@@ -303,10 +309,10 @@ def reconcile(ex, st):
                     side = "sell" if signed > 0 else "buy"
                     q = float(ex.amount_to_precision(M(sym), abs(signed)))
                     ex.create_order(M(sym), "market", side, q, None, {"reduceOnly": True})
-                    tg(f"🧹 Прибрано залишок минулої епохи: {sym} закрито ({q}), ордери знято")
+                    note(f"🧹 Прибрано залишок минулої епохи: {sym} закрито ({q}), ордери знято")
                 except Exception as e:
                     print("stale close", sym, e)
-        tg(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
+        note(f"♻️ Reconcile: відкритих позицій на біржі {sum(1 for s in COINS if s in st['pos'])}")
     except Exception as e:
         print("reconcile помилка:", e)
 
@@ -413,7 +419,7 @@ def ensure_protective(ex, symbol, p, amt):
             except Exception: pass
         stops = []; tps = []; ids.pop("stop", None); ids.pop("tp", None)
         if not p.get("prot_purge_note"):
-            tg(f"🧯 {symbol}: знесено {len(ro)} дублікатів захисту, ставлю чисту пару стоп+тейк")
+            note(f"🧯 {symbol}: знесено {len(ro)} дублікатів захисту, ставлю чисту пару стоп+тейк")
             p["prot_purge_note"] = True
     for extra in stops[1:] + tps[1:]:                # дублікати від старих циклів -> геть
         try: ex.cancel_order(extra["id"], M(symbol))
@@ -428,8 +434,8 @@ def ensure_protective(ex, symbol, p, amt):
         return
     if p.get("prot_tries", 0) >= 3:                  # 3 невдалі доставки -> стоп, не спамимо ордерами
         if not p.get("prot_gaveup"):
-            tg(f"‼️ {symbol}: захист не тримається після 3 спроб — постав руками стоп "
-               f"{p['stop']:.4f} / тейк {p['target']:.4f} і кинь скрін")
+            note(f"‼️ {symbol}: захист не тримається після 3 спроб — постав руками стоп "
+                 f"{p['stop']:.4f} / тейк {p['target']:.4f} і кинь скрін")
             p["prot_gaveup"] = True
         return
     try:
@@ -440,12 +446,12 @@ def ensure_protective(ex, symbol, p, amt):
         for k, v in (prot or {}).items(): ids[k] = v
         if prot and not p.get("prot_note") and NOTIFY_TRADES:
             legs = "+стоп" * ("stop" in prot) + "+тейк" * ("tp" in prot)
-            tg(f"🛡 Доставлено захист {symbol}: {legs}")
+            note(f"🛡 Доставлено захист {symbol}: {legs}")
             p["prot_note"] = True                    # один раз на позицію, без спаму
     except Exception as e:
         print("protective", symbol, e)
         if not p.get("prot_warn"):
-            tg(f"⚠️ не вдалось поставити захист {symbol}: {e}")
+            note(f"⚠️ не вдалось поставити захист {symbol}: {e}")
             p["prot_warn"] = True
 
 def live_pos_signed(ex, symbol):
@@ -623,7 +629,7 @@ def step_fvg_slot(ex, st, symbol, df):
     if p["status"] == "watch":
         if touched:                                   # ретест зарано -> фільтр wait>2
             st["pos"].pop(symbol)
-            if NOTIFY_TRADES: tg(f"🚫 FVG {symbol}: ретест у перші {FVG_WAIT} бари — сетап згорів")
+            if NOTIFY_TRADES: note(f"🚫 FVG {symbol}: ретест у перші {FVG_WAIT} бари — сетап згорів")
             return
         if p["bars_waited"] < FVG_WAIT:               # ще чекаємо чисті бари
             return
@@ -639,10 +645,10 @@ def step_fvg_slot(ex, st, symbol, df):
             print(f"  [skip] {symbol}: розмір нижчий за мінімум біржі"); return
         p["qty"] = qty; p["status"] = "pending"; p["placed"] = False
         if NOTIFY_TRADES:
-            tg(f"⏳ {symbol} {p['side'].upper()}: лімітка готова @ {p['entry']:.4f} — ЩЕ НЕ в позиції.\n"
-               f"Виставлю на біржу лише коли тренд+ADX за напрямом; заходжу ТІЛЬКИ на ретесті.\n"
-               f"Якщо зайде: стоп {p['stop']:.4f} / тейк {p['target']:.4f} (ризик {RISK_PCT*100:.1f}%).\n"
-               f"Реальний вхід підтвердить окреме «📥 Філ».")
+            note(f"⏳ {symbol} {p['side'].upper()}: лімітка готова @ {p['entry']:.4f} — ЩЕ НЕ в позиції.\n"
+                 f"Виставлю на біржу лише коли тренд+ADX за напрямом; заходжу ТІЛЬКИ на ретесті.\n"
+                 f"Якщо зайде: стоп {p['stop']:.4f} / тейк {p['target']:.4f} (ризик {RISK_PCT*100:.1f}%).\n"
+                 f"Реальний вхід підтвердить окреме «📥 Філ».")
         # НЕ повертаємось: далі (live) виставляємо лімітку ЦЬОГО ж бару, щоб вона стояла
         # на книзі вже наступного бару (fill з k+3, як у бектесті). У DRY нижче touched=False,
         # тож філ цього бару не станеться — філи з наступного бару.
@@ -650,7 +656,7 @@ def step_fvg_slot(ex, st, symbol, df):
     if p["bars_waited"] >= FVG_EXPIRY:                # 20 барів від формування -> знято
         if not DRY_RUN and p.get("placed"): cancel_symbol_orders(ex, symbol)
         st["pos"].pop(symbol)
-        if NOTIFY_TRADES: tg(f"🚫 Лімітку знято {symbol} — не зайшло за {FVG_EXPIRY} барів")
+        if NOTIFY_TRADES: note(f"🚫 Лімітку знято {symbol} — не зайшло за {FVG_EXPIRY} барів")
         return
     cond = fvg_conditions_ok(df, p["side"])
     if DRY_RUN:
@@ -665,7 +671,7 @@ def step_fvg_slot(ex, st, symbol, df):
                     paper_close(st, symbol, p, "stop", p["stop"], bar_dt)
             else:
                 st["pos"].pop(symbol)
-                if NOTIFY_TRADES: tg(f"🚫 FVG {symbol}: ретест без тренду/ADX≥20 — сетап згорів")
+                if NOTIFY_TRADES: note(f"🚫 FVG {symbol}: ретест без тренду/ADX≥20 — сетап згорів")
         return
     # live/demo: тримаємо ордер на книзі лише коли умови ок
     if cond and not p.get("placed"):
@@ -699,7 +705,7 @@ def handle_symbol(ex, st, symbol, df):
         if not DRY_RUN and p.get("placed"): cancel_symbol_orders(ex, symbol)
         st["pos"].pop(symbol, None)
         cand = kc
-        if NOTIFY_TRADES: tg(f"↪️ KC перехоплює слот {symbol} (FVG-лімітку знято)")
+        if NOTIFY_TRADES: note(f"↪️ KC перехоплює слот {symbol} (FVG-лімітку знято)")
     else:
         cand = cands[0]                                   # перший сигнал бере слот
     if cand["typ"] == "arm":                              # FVG-пакет: спершу фаза watch
@@ -708,9 +714,9 @@ def handle_symbol(ex, st, symbol, df):
                                  bars_waited=0, adx=cand.get("adx"))
         if NOTIFY_TRADES:
             axv = cand.get("adx")
-            tg(f"🕐 FVG {symbol} {cand['side'].upper()}: зона сформована, лімітка на 50% "
-               f"({cand['entry']:.4f}) озброїться через {FVG_WAIT} бари"
-               + (f" | ADX {axv:.1f}" if axv is not None else ""))
+            note(f"🕐 FVG {symbol} {cand['side'].upper()}: зона сформована, лімітка на 50% "
+                 f"({cand['entry']:.4f}) озброїться через {FVG_WAIT} бари"
+                 + (f" | ADX {axv:.1f}" if axv is not None else ""))
         return
     eq = equity_now(ex, st)
     qty = position_qty(eq, cand["entry"], cand["stop"])
@@ -748,7 +754,7 @@ def handle_symbol(ex, st, symbol, df):
         except Exception as e:
             cancel_symbol_orders(ex, symbol)         # прибрати завислий вхідний ордер, якщо вхід частково впав
             st["pos"].pop(symbol, None)
-            tg(f"⚠️ помилка ордера {symbol}: {e}")
+            note(f"⚠️ помилка ордера {symbol}: {e}")
 
 # ----------------------------- KILL-SWITCH + ЗВІТ ---------------------------
 def check_day_and_killswitch(st, eq):
