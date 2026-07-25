@@ -28,6 +28,7 @@
   python trade_bot.py close SOL/USDT   # закрити позицію+ордери по монеті (або: close all)
   python trade_bot.py protect ETH/USDT 1686 1853   # почепити стоп/тейк на живу позицію
   python trade_bot.py preflight # перевірка контракту з біржею (після кожного git pull!)
+  python trade_bot.py scan      # ЧОМУ мало сигналів: жива картина ADX/EMA/detect/слот по монетах
   python trade_bot.py selftest  # офлайн-перевірка логіки на локальних CSV (без біржі)
 
 ЗМІННІ ОТОЧЕННЯ:
@@ -853,6 +854,31 @@ def main():
         ensure_protective(ex, sym, p, amt)
         save_state(st)
         print(f"{sym} {side} amt={amt}: стоп {sp} / тейк {tp} | ордери: {p.get('ids')}")
+        return
+    if mode == "scan":                       # ЧОМУ мало сигналів: жива картина по кожній монеті
+        print(f"ENTRIES_ENABLED буде обчислено в run; preflight зараз:", "OK" if preflight(ex) else "ПРОВАЛ")
+        for symbol in COINS:
+            try:
+                df = with_retry(fetch_closed, ex, symbol)
+            except Exception as e:
+                print(f"\n{symbol}: fetch ПАДАЄ -> {e} (це БАГ: нема даних = нема сигналів)"); continue
+            c = df["close"]; trend = ema(c, EMA_TREND); ax = adx(df, ADX_LEN)
+            mid = ema(c, KC_EMA); band = KC_MULT * atr(df, KC_ATR)
+            i = len(df) - 1
+            cands = detect(df, COINS[symbol])
+            print(f"\n{symbol}: барів {len(df)} | {str(df['dt'].iloc[0])[:16]} .. {str(df['dt'].iloc[-1])[:16]}")
+            if len(df) < EMA_TREND + 5:
+                print(f"  ⛔ БАРІВ ЗАМАЛО ({len(df)}<{EMA_TREND+5}) -> detect завжди порожній! (тонкі дані testnet?)")
+            print(f"  close {c.iloc[-1]:.4f} | EMA200 {trend.iloc[-1]:.4f} -> ціна {'ВИЩЕ (лонг-зона)' if c.iloc[-1]>trend.iloc[-1] else 'НИЖЧЕ (шорт-зона)'}")
+            axl = ax.tail(6).round(1).tolist()
+            print(f"  ADX останні 6 барів: {axl} -> {'≥20 (тренд, можна)' if ax.iloc[-1]>=ADX_MIN else '<20 (ФЛЕТ -> KC блоковано)'}")
+            print(f"  KC: верх {(mid+band).iloc[-1]:.4f} / низ {(mid-band).iloc[-1]:.4f} (close {'над верхом' if c.iloc[-1]>(mid+band).iloc[-1] else ('під низом' if c.iloc[-1]<(mid-band).iloc[-1] else 'усередині каналу — пробою нема')})")
+            print(f"  detect() -> {len(cands)} кандидатів: {[(x['engine'], x['side'], x['typ']) for x in cands]}")
+            p = st['pos'].get(symbol)
+            if p:
+                print(f"  СЛОТ ЗАЙНЯТО: {p.get('status')} {p.get('engine')} {p.get('side')} bars_waited={p.get('bars_waited')} (блокує нові до звільнення)")
+            else:
+                print(f"  слот вільний")
         return
     if mode == "positions":                  # діагностика: сирі позиції/ордери з біржі
         try:
