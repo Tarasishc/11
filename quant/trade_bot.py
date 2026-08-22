@@ -782,6 +782,9 @@ def daily_report(st, eq):
              f"Відкриті: {openp}",
              f"Всього угод у журналі: {len(st['trades'])}",
              f"Бенчмарк: очікування ≈ +0.2R/угода (якщо за 30+ угод нижче 0 — стоп)"]
+    if not DRY_RUN and not ENTRIES_ENABLED:              # гучне попередження: бот НЕ відкриває позицій
+        lines.insert(1, "⛔ <b>УВАГА: НОВІ ВХОДИ ВИМКНЕНО</b> (preflight не пройдено) — "
+                        "бот не відкриває позиції! Перевір зв'язок/ключі й перезапусти.")
     fvg = [t for t in st["trades"] if t.get("eng") == "FVG" and t.get("adx") is not None]
     if fvg:                                              # накопичувальний форвард-тест фільтра ADX
         lo = [t["r"] for t in fvg if t["adx"] < ADX_MIN]; hi = [t["r"] for t in fvg if t["adx"] >= ADX_MIN]
@@ -904,10 +907,21 @@ def main():
         ENTRIES_ENABLED = preflight(ex)          # контракт з біржею; провал -> без нових входів
     tg(f"🤖 Бот запущено ({banner})" + ("" if ENTRIES_ENABLED else " ⛔ входи вимкнено (preflight)"))
     last_report_day = ""
+    last_preflight = time.time()                  # для авто-відновлення входів (див. нижче)
     while True:
         try:
             run_once(ex, st)
             now = _utcnow()
+            # АВТО-ВІДНОВЛЕННЯ: якщо входи вимкнені preflight-ом (міг бути ТИМЧАСОВИЙ збій
+            # на старті), періодично пробуємо ще раз і вмикаємо назад, коли зв'язок ок.
+            # Тільки «вмикаємо» — щоб короткий мережевий збій під час роботи НЕ вимкнув
+            # робочого бота (там усі виклики й так у try/except і просто пропускають угоду).
+            if not DRY_RUN and not ENTRIES_ENABLED and time.time() - last_preflight >= 1800:
+                last_preflight = time.time()
+                load_markets_safe(ex)             # ринки/символи могли не завантажитись на старті
+                if preflight(ex):
+                    ENTRIES_ENABLED = True
+                    tg("✅ Preflight пройдено — <b>входи знову увімкнено</b>.")
             if now.hour == REPORT_HOUR_UTC and now.strftime("%Y-%m-%d") != last_report_day:
                 daily_report(st, equity_now(ex, st)); last_report_day = now.strftime("%Y-%m-%d")
         except Exception as e:
