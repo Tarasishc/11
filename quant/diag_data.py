@@ -40,7 +40,8 @@ def fetch_all(ex, sym, days=400):
 def live_backtest(d, engines=("KC","FVG")):
     """1-в-1 з машиною станів бота (одна поз/монету, KC-перехоплення)."""
     n = len(d)
-    if n < tb.EMA_TREND + 10: return pd.DataFrame(columns=["t","eng","R"])
+    cols = ["t", "eng", "R", "netR", "reason"]
+    if n < tb.EMA_TREND + 10: return pd.DataFrame(columns=cols)
     c = d["close"]; h = d["high"]; l = d["low"]
     mid = tb.ema(c, tb.KC_EMA); band = tb.KC_MULT*tb.atr(d, tb.KC_ATR); up = mid+band; lo = mid-band
     trend = tb.ema(c, tb.EMA_TREND); ax = tb.adx(d, tb.ADX_LEN); a14 = tb.atr(d, tb.STOP_ATR)
@@ -49,13 +50,20 @@ def live_backtest(d, engines=("KC","FVG")):
     def kc(k, side):
         if side > 0: return c[k] > up[k] and c[k] > trend[k] and ax[k] >= tb.ADX_MIN
         return c[k] < lo[k] and c[k] < trend[k] and ax[k] >= tb.ADX_MIN
+    def close_r(p, reason):
+        """gross ±R і НЕТТО R з витратами (як paper_close бота: слипи + комісії)."""
+        en = p["entry"]; D = abs(p["entry"] - p["stop"]); sgn = 1 if p["side"] == "long" else -1
+        en_f = en * (1 + sgn * tb.ENTRY_SLIP)
+        ex_f = p["stop"] * (1 - sgn * tb.STOP_SLIP) if reason == "stop" else p["tgt"]
+        net = sgn * (ex_f - en_f) / D - 2 * tb.FEE_RATE * (en_f / D)
+        return (-1.0 if reason == "stop" else tb.RR), net
     pos = None; tr = []
     for i in range(tb.EMA_TREND+5, n):
         if pos and pos["st"] == "in_pos":
             if pos["side"] == "long": hs = l[i] <= pos["stop"]; ht = h[i] >= pos["tgt"] and i > pos["nt"]
             else: hs = h[i] >= pos["stop"]; ht = l[i] <= pos["tgt"] and i > pos["nt"]
-            if hs: tr.append((dt[i], pos["eng"], -1.0)); pos = None
-            elif ht: tr.append((dt[i], pos["eng"], tb.RR)); pos = None
+            if hs: tr.append((dt[i], pos["eng"], *close_r(pos, "stop"), "stop")); pos = None
+            elif ht: tr.append((dt[i], pos["eng"], *close_r(pos, "target"), "target")); pos = None
         elif pos and pos["st"] == "watch":
             pos["w"] += 1
             t = l[i] <= pos["entry"] if pos["side"] == "long" else h[i] >= pos["entry"]
@@ -73,7 +81,7 @@ def live_backtest(d, engines=("KC","FVG")):
                     if okc and np.isfinite(ax[i]) and ax[i] >= tb.ADX_MIN:
                         pos["st"] = "in_pos"; pos["nt"] = i
                         hs = l[i] <= pos["stop"] if pos["side"] == "long" else h[i] >= pos["stop"]
-                        if hs: tr.append((dt[i], pos["eng"], -1.0)); pos = None
+                        if hs: tr.append((dt[i], pos["eng"], *close_r(pos, "stop"), "stop")); pos = None
                     else: pos = None
         if pos and pos["st"] in ("watch", "pending"):
             D = tb.KC_STOP_X*a14[i]
@@ -92,13 +100,25 @@ def live_backtest(d, engines=("KC","FVG")):
             elif l[i-2] > h[i] and c[i] < trend[i]:
                 np_ = dict(st="watch", side="short", eng="FVG", entry=(h[i]+l[i-2])/2, zb=l[i-2], w=0)
         pos = np_
-    return pd.DataFrame(tr, columns=["t", "eng", "R"])
+    return pd.DataFrame(tr, columns=["t", "eng", "R", "netR", "reason"])
+
+def pnl_summary(A, label, risk, start=1000.0):
+    """Компаунд по нетто-R у хронології (спільний баланс, ризик% від поточного)."""
+    A = A.sort_values("t"); bal = start
+    for r in A["netR"]: bal *= (1 + risk * r)
+    n = len(A); wr = (A["netR"] > 0).mean() * 100 if n else 0
+    ret = (bal / start - 1) * 100
+    print(f"  {label}: угод {n} | WR {wr:.0f}% | сума {A['netR'].sum():+.1f}R (нетто) | "
+          f"депозит {start:.0f} → {bal:.0f} ({ret:+.1f}%)")
+    return ret
 
 def main():
+    days = int(sys.argv[1]) if len(sys.argv) > 1 else 45          # вікно для P&L (за замовч. ~1.5 міс)
     ex = tb.make_exchange(); tb.load_markets_safe(ex)
     api = ex.urls.get("api", {}); url = api.get("fapiPublic") if isinstance(api, dict) else api
     print(f"Джерело даних: {'TESTNET (демо)' if tb.TESTNET else 'MAINNET'} -> {url}")
     print(f"Порівняння: бектест мейннету ETH+SOL = ~8.6 входів/міс (медіана 9, найгірше 2-міс вікно = 8).\n")
+    all_tr = []
     for sym in tb.COINS:
         try:
             d = fetch_all(ex, sym)
@@ -116,7 +136,7 @@ def main():
         kcL = (c > up) & (c > trend) & (ax >= tb.ADX_MIN); kcS = (c < lo) & (c < trend) & (ax >= tb.ADX_MIN)
         kcf = int((kcL & ~kcL.shift(1, fill_value=False)).sum() + (kcS & ~kcS.shift(1, fill_value=False)).sum())
         fvg = int(((h.shift(2) < l) & (c > trend)).sum() + ((l.shift(2) > h) & (c < trend)).sum())
-        T = live_backtest(d)
+        T = live_backtest(d); T["coin"] = sym; all_tr.append(T)
         print(f"=== {sym} ===")
         print(f"  барів {len(d)} | {str(d['dt'].iloc[0])[:16]} .. {str(d['dt'].iloc[-1])[:16]} "
               f"(~{span_days}д = {span_mo:.1f} міс)")
@@ -128,8 +148,21 @@ def main():
               f"| KC {int((T.eng=='KC').sum())} | FVG {int((T.eng=='FVG').sum())}")
         print(f"     -> очікували ~4.3/міс на монету; тут {len(T)/span_mo:.2f}/міс "
               + ("✅ у нормі" if len(T)/span_mo >= 2 else "⛔ РІЗКО МЕНШЕ -> дані демо винні") + "\n")
-    print("Висновок: якщо '/міс' на testnet різко нижче мейннету -> демо-дані не")
-    print("відтворюють ринок, і 'тиша' — артефакт testnet, а не поломка/стратегія.")
+    # ---- P&L: що стратегія ЗРОБИЛА Б (бот був зламаний Hedge Mode -> реально угод не було) ----
+    if all_tr:
+        A = pd.concat(all_tr, ignore_index=True); A["t"] = pd.to_datetime(A["t"], utc=True)
+        risk = tb.RISK_PCT
+        print(f"\n=== СИМУЛЯЦІЯ P&L на РЕАЛЬНИХ testnet-даних (ETH+SOL разом) ===")
+        print(f"Витрати: комісія {tb.FEE_RATE*100:.2f}%/сторону + слипи; ризик {risk*100:.0f}% від балансу (компаунд).")
+        print(f"⚠️ Це НЕ реальний результат бота (він був зламаний Hedge Mode і не торгував) —")
+        print(f"   це те, що стратегія зробила Б, якби ордери проходили:")
+        cut = A["t"].max() - pd.Timedelta(days=days)
+        pnl_summary(A[A["t"] >= cut], f"останні {days}д (≈{days/30.44:.1f} міс)", risk)
+        pnl_summary(A, "весь період (для контексту)", risk)
+        span_mo = max((A["t"].max() - A["t"].min()).days / 30.44, 0.1)
+        print(f"  частота: {len(A)/span_mo:.1f} угод/міс | KC {int((A.eng=='KC').sum())} FVG {int((A.eng=='FVG').sum())}")
+    print("\nВисновок: якщо '/міс' на testnet у нормі (~7-8) -> дані/стратегія справні,")
+    print("а причина 'тиші' була в Hedge Mode (виправлено). Реальний форвард почнеться тепер.")
 
 if __name__ == "__main__":
     main()
