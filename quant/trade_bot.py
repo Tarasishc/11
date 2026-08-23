@@ -200,8 +200,12 @@ def save_state(s): json.dump(s, open(STATE_FILE, "w"), indent=1, default=str)
 # ----------------------------- БІРЖА ----------------------------------------
 def make_exchange():
     if ccxt is None: raise RuntimeError("немає ccxt: pip install ccxt")
-    ex = ccxt.binanceusdm({"apiKey": API_KEY, "secret": API_SECRET,
-                           "enableRateLimit": True})
+    # У DRY (папір) ключі не потрібні — і НЕ шлемо їх, щоб на мейннеті публічні дані
+    # (klines) тягнулись чисто: інакше ccxt додає X-MBX-APIKEY і мейннет відхиляє
+    # testnet-ключ навіть на публічних викликах (-2008). Папір по реальному ринку.
+    key = "" if DRY_RUN else API_KEY
+    sec = "" if DRY_RUN else API_SECRET
+    ex = ccxt.binanceusdm({"apiKey": key, "secret": sec, "enableRateLimit": True})
     if TESTNET:
         # Binance Demo Trading (ф'ючерсний testnet). set_sandbox_mode наводить
         # URL на testnet.binancefuture.com. Новий ccxt ДОДАТКОВО блокує ф'ючерсне
