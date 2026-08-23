@@ -985,6 +985,23 @@ def main():
         save_state(st)
         print(f"{sym} {side} amt={amt}: стоп {sp} / тейк {tp} | ордери: {p.get('ids')}")
         return
+    if mode == "limits":                     # мінімуми біржі -> який депозит треба, щоб угоди не пропускались
+        print(f"Мінімальний депозит для авто-торгівлі (ризик {RISK_PCT*100:.0f}%, щоб угоди НЕ пропускались):\n")
+        need_all = 0.0
+        for s in COINS:
+            mc, ma = limits_for(ex, s)
+            try: px = float(ex.fetch_ticker(M(s))["last"])
+            except Exception: px = 0.0
+            wide = 0.08                       # широкий стоп (2×ATR буває ~8% ціни) — найгірший для сайзу
+            eq_notional = mc * wide / RISK_PCT if mc else 0        # нотіонал >= min notional
+            eq_qty = 5 * ma * px * wide / RISK_PCT if (ma and px) else 0   # qty >= 5 кроків (мале округлення)
+            need = max(eq_notional, eq_qty)
+            need_all = max(need_all, need)
+            print(f"  {s}: ціна {px:.2f} | min notional {mc} USDT | min qty {ma}")
+            print(f"      -> щоб угоди по {s.split('/')[0]} НЕ пропускались і ризик був точним: депозит ≥ ~${need:.0f}")
+        print(f"\nОтже мінімально «нормально функціонувати» (обидві монети): ≈ ${need_all:.0f}")
+        print(f"Рекомендація: взяти з запасом ×1.5-2 (просадки/варіативність) -> ~${need_all*1.7:.0f}")
+        return
     if mode == "scan":                       # ЧОМУ мало сигналів: жива картина по кожній монеті
         print(f"ENTRIES_ENABLED буде обчислено в run; preflight зараз:", "OK" if preflight(ex) else "ПРОВАЛ")
         for symbol in COINS:
