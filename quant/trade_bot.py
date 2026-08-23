@@ -769,6 +769,42 @@ def check_day_and_killswitch(st, eq):
            f"Нові входи зупинено до завтра.")
     return st["halted"]
 
+def journal_dump(st):
+    """Діагностика БЕЗ біржі (лише bot_state.json): що бот НАСПРАВДІ робив.
+    Ключове: last_bar = свіжість даних, які БАЧИВ бот (чи не застряг на старих),
+    слоти, і журнал угод по місяцях — щоб побачити, де зникають входи."""
+    now = _utcnow()
+    print("=== СТАН БОТА (bot_state.json) ===")
+    print(f"equity={st.get('equity')} | day={st.get('day')} | halted={st.get('halted')}")
+    print(f"\nОстанній ОБРОБЛЕНИЙ бар (що бачив бот -> чи свіжі дані):")
+    for sym in COINS:
+        lb = (st.get("last_bar") or {}).get(sym)
+        if not lb: print(f"  {sym}: (нема)"); continue
+        try:
+            t = pd.Timestamp(lb).to_pydatetime().replace(tzinfo=None)
+            age = (now - t).total_seconds() / 3600
+            flag = "✅ свіжий" if age < 8 else f"⚠️ СТАРИЙ на {age:.0f}г — БОТ ЗАСТРЯГ НА СТАРИХ ДАНИХ!"
+            print(f"  {sym}: {lb}  ({flag})")
+        except Exception:
+            print(f"  {sym}: {lb}")
+    print(f"\nСлоти зараз:")
+    for sym in COINS:
+        p = (st.get("pos") or {}).get(sym)
+        print(f"  {sym}: {p if p else 'вільний'}")
+    tr = st.get("trades", [])
+    print(f"\nУгод у журналі ВСЬОГО: {len(tr)}")
+    if tr:
+        df = pd.DataFrame(tr); df["t"] = pd.to_datetime(df["t"], errors="coerce")
+        df["ym"] = df["t"].dt.strftime("%Y-%m")
+        print("  по місяцях (реасони закриття):")
+        for ym, g in df.groupby("ym"):
+            rc = {k: int(v) for k, v in g["reason"].value_counts().items()} if "reason" in g else {}
+            print(f"    {ym}: {len(g):3d} угод  {rc}")
+        print("  останні 20 записів журналу:")
+        for _, r in df.tail(20).iterrows():
+            print(f"    {str(r['t'])[:16]}  {r.get('sym'):9s} {str(r.get('eng')):4s} "
+                  f"{str(r.get('side')):5s} {str(r.get('reason')):8s} {float(r.get('r') or 0):+.1f}R")
+
 def coin_picture(ex, st):
     """Компактна жива картина по монетах для звіту: тренд / ADX / стан KC / слот.
     Щоб було видно, що бот ЖИВИЙ і ЧОМУ тихо (сильний тренд -> KC в каналі,
@@ -853,6 +889,8 @@ def main():
     if mode == "selftest":
         return selftest()
     st = load_state()
+    if mode == "journal":                        # діагностика зі стану, БЕЗ біржі/ключів
+        return journal_dump(st)
     ex = make_exchange()
     load_markets_safe(ex)
     if mode == "balance":                    # діагностика підключення (демо/лайв)
