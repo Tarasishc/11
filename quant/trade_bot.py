@@ -521,10 +521,31 @@ def preflight(ex):
         float(ex.fetch_balance()["USDT"]["total"])
     except Exception as e:
         probs.append(f"fetch_balance: {e}")
+    # РЕАЛЬНА перевірка ЗАПИСУ: чи може ключ ВЗАГАЛІ виставити ордер (не лише читати).
+    # Раніше preflight перевіряв тільки читання -> ключ без права торгівлі проходив як OK,
+    # а бот мовчки не міг відкрити жодної позиції (симптом: 1 угода за 2 міс, placed=False).
+    # Ставимо крихітну лімітку ДАЛЕКО від ціни (не виконається) ТИМ САМИМ типом, що й FVG
+    # (GTX post-only), і одразу знімаємо. Помилка тут = точна причина «не торгує».
+    if not DRY_RUN:
+        ts = next(iter(COINS)); oid = None
+        try:
+            px = float(ex.fetch_ticker(M(ts))["last"])
+            min_cost, min_amt = limits_for(ex, ts)
+            tpx = float(ex.price_to_precision(M(ts), px * 0.5))          # -50% -> точно НЕ філ
+            q = float(ex.amount_to_precision(M(ts), max((min_cost or 5) / tpx * 1.2, min_amt or 0)))
+            oid = ex.create_order(M(ts), "limit", "buy", q, tpx, {"timeInForce": "GTX"}).get("id")
+            print(f"preflight: тест-ордер OK — {ts} лімітка виставилась (ключ УМІЄ торгувати)")
+        except Exception as e:
+            probs.append(f"ТЕСТ-ОРДЕР ПРОВАЛЕНО ({ts}): {e} — "
+                         f"типово: ключ БЕЗ права 'Futures Trade' або IP-обмеження ріже VPS")
+        finally:
+            if oid:
+                try: ex.cancel_order(oid, M(ts))
+                except Exception as e: print("preflight: тест-ордер не знявся (прибере reconcile):", e)
     if probs:
         tg("⛔ <b>PREFLIGHT провалено</b> — нові входи ВИМКНЕНО до фіксу:\n" + "\n".join(f"• {p}" for p in probs))
         return False
-    print("preflight: OK (символи/позиції/ордери/precision/баланс)")
+    print("preflight: OK (читання + ЗАПИС ордера)")
     return True
 
 def poll_live(ex, st):
