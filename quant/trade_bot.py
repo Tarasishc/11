@@ -49,6 +49,24 @@ except Exception:
 def _utcnow():                                   # naive UTC (без DeprecationWarning від utcnow)
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
+def _load_dotenv():
+    """Автозавантаження bot.env (рядки KEY=VAL) у os.environ, якщо змінної ще нема.
+    Щоб ручні запуски (scan/journal/preflight) бачили ключі БЕЗ 'source bot.env'
+    (веб-консоль VPS калічить таку команду). Змінні від systemd мають пріоритет."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in ("bot.env", os.path.join(here, "bot.env"), os.path.join(here, "..", "bot.env")):
+        if not os.path.exists(path): continue
+        try:
+            for line in open(path):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line: continue
+                k, v = line.split("=", 1); k = k.strip(); v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ: os.environ[k] = v
+        except Exception as e:
+            print("bot.env не прочитано:", e)
+        break
+_load_dotenv()
+
 # ----------------------------- КОНФІГ ---------------------------------------
 DRY_RUN     = os.getenv("BOT_DRY_RUN", "1") == "1"
 TESTNET     = os.getenv("BOT_TESTNET", "1") == "1"
