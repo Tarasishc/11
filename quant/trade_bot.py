@@ -769,7 +769,32 @@ def check_day_and_killswitch(st, eq):
            f"Нові входи зупинено до завтра.")
     return st["halted"]
 
-def daily_report(st, eq):
+def coin_picture(ex, st):
+    """Компактна жива картина по монетах для звіту: тренд / ADX / стан KC / слот.
+    Щоб було видно, що бот ЖИВИЙ і ЧОМУ тихо (сильний тренд -> KC в каналі,
+    FVG-лімітка висить без ретесту), а не «завис/зламався»."""
+    out = []
+    for symbol in COINS:
+        try:
+            df = fetch_closed(ex, symbol); c = df["close"]; i = len(df) - 1
+            trend = ema(c, EMA_TREND).iloc[i]; ax = adx(df, ADX_LEN).iloc[i]
+            mid = ema(c, KC_EMA).iloc[i]; b = KC_MULT * atr(df, KC_ATR).iloc[i]; price = c.iloc[i]
+            tdir = "аптренд↑" if price > trend else "даунтренд↓"
+            kc = "пробій↑" if price > mid + b else ("пробій↓" if price < mid - b else "в каналі")
+            p = st["pos"].get(symbol)
+            if not p: slot = "вільний"
+            elif p.get("status") in ("in_pos", "live"): slot = f"У ПОЗИЦІЇ {str(p.get('side')).upper()}"
+            elif p.get("status") == "pending":
+                slot = f"{p.get('engine')} {p.get('side')} лімітка {p.get('bars_waited',0)}/{FVG_EXPIRY} (жду ретест)"
+            elif p.get("status") == "watch":
+                slot = f"{p.get('engine')} {p.get('side')} watch {p.get('bars_waited',0)}/{FVG_WAIT}"
+            else: slot = str(p.get("status"))
+            out.append(f"• {symbol.split('/')[0]}: {tdir} ADX {ax:.0f} | KC:{kc} | слот: {slot}")
+        except Exception as e:
+            out.append(f"• {symbol.split('/')[0]}: картина недоступна ({str(e)[:40]})")
+    return out
+
+def daily_report(ex, st, eq):
     since = _utcnow() - dt.timedelta(hours=24)
     rec = [t for t in st["trades"] if pd.Timestamp(t["t"]).to_pydatetime().replace(tzinfo=None) >= since]
     nr = len(rec); wins = sum(1 for t in rec if t["r"] > 0)
@@ -790,6 +815,8 @@ def daily_report(st, eq):
         lo = [t["r"] for t in fvg if t["adx"] < ADX_MIN]; hi = [t["r"] for t in fvg if t["adx"] >= ADX_MIN]
         av = lambda x: sum(x) / len(x) if x else 0.0
         lines.append(f"🔬 FVG форвард ADX: &lt;20 → {len(lo)}уг {av(lo):+.2f}R | ≥20 → {len(hi)}уг {av(hi):+.2f}R")
+    lines.append("🔎 <b>Жива картина</b> (бот працює, ось стан ринку):")
+    lines += coin_picture(ex, st)
     tg("\n".join(lines))
 
 # ----------------------------- ЦИКЛ -----------------------------------------
@@ -898,9 +925,9 @@ def main():
         return
     reconcile(ex, st)
     if mode == "once":
-        run_once(ex, st); daily_report(st, equity_now(ex, st)); return
+        run_once(ex, st); daily_report(ex, st, equity_now(ex, st)); return
     if mode == "report":
-        daily_report(st, equity_now(ex, st)); return
+        daily_report(ex, st, equity_now(ex, st)); return
     # mode == run: цикл
     global ENTRIES_ENABLED
     if not DRY_RUN:
@@ -923,7 +950,7 @@ def main():
                     ENTRIES_ENABLED = True
                     tg("✅ Preflight пройдено — <b>входи знову увімкнено</b>.")
             if now.hour == REPORT_HOUR_UTC and now.strftime("%Y-%m-%d") != last_report_day:
-                daily_report(st, equity_now(ex, st)); last_report_day = now.strftime("%Y-%m-%d")
+                daily_report(ex, st, equity_now(ex, st)); last_report_day = now.strftime("%Y-%m-%d")
         except Exception as e:
             print("loop помилка:", e)
         time.sleep(60)
