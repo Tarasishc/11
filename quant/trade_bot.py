@@ -545,21 +545,36 @@ def preflight(ex):
     # Ставимо крихітну лімітку ДАЛЕКО від ціни (не виконається) ТИМ САМИМ типом, що й FVG
     # (GTX post-only), і одразу знімаємо. Помилка тут = точна причина «не торгує».
     if not DRY_RUN:
-        ts = next(iter(COINS)); oid = None
-        try:
+        ts = next(iter(COINS))
+        def _place_test():
             px = float(ex.fetch_ticker(M(ts))["last"])
             min_cost, min_amt = limits_for(ex, ts)
             tpx = float(ex.price_to_precision(M(ts), px * 0.5))          # -50% -> точно НЕ філ
             q = float(ex.amount_to_precision(M(ts), max((min_cost or 5) / tpx * 1.2, min_amt or 0)))
-            oid = ex.create_order(M(ts), "limit", "buy", q, tpx, {"timeInForce": "GTX"}).get("id")
-            print(f"preflight: тест-ордер OK — {ts} лімітка виставилась (ключ УМІЄ торгувати)")
+            return ex.create_order(M(ts), "limit", "buy", q, tpx, {"timeInForce": "GTX"}).get("id")
+        oid = None
+        try:
+            oid = _place_test()
+            print(f"preflight: тест-ордер OK — {ts} лімітка виставилась (запис працює)")
         except Exception as e:
-            probs.append(f"ТЕСТ-ОРДЕР ПРОВАЛЕНО ({ts}): {e} — "
-                         f"типово: ключ БЕЗ права 'Futures Trade' або IP-обмеження ріже VPS")
+            es = str(e)
+            # -4061: акаунт у HEDGE MODE (двобічні позиції), а бот шле ордери без positionSide.
+            # Стратегія працює в ONE-WAY -> пробуємо перемкнути і повторити ордер.
+            if "-4061" in es or "position side" in es.lower():
+                try:
+                    ex.set_position_mode(False)                         # False = one-way
+                    print("preflight: акаунт був у HEDGE MODE -> перемкнув у One-way, пробую знову")
+                    oid = _place_test()
+                    print("preflight: тест-ордер OK після переходу в One-way ✅")
+                except Exception as e2:
+                    probs.append(f"акаунт у HEDGE MODE і НЕ вдалось перемкнути в One-way ({e2}). "
+                                 f"Закрий ВСІ позиції на демо і перемкни Position Mode → One-way вручну в Binance")
+            else:
+                probs.append(f"ТЕСТ-ОРДЕР ПРОВАЛЕНО ({ts}): {e}")
         finally:
             if oid:
                 try: ex.cancel_order(oid, M(ts))
-                except Exception as e: print("preflight: тест-ордер не знявся (прибере reconcile):", e)
+                except Exception as ec: print("preflight: тест-ордер не знявся (прибере reconcile):", ec)
     if probs:
         tg("⛔ <b>PREFLIGHT провалено</b> — нові входи ВИМКНЕНО до фіксу:\n" + "\n".join(f"• {p}" for p in probs))
         return False
