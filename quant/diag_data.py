@@ -152,7 +152,8 @@ def main():
     if all_tr:
         A = pd.concat(all_tr, ignore_index=True); A["t"] = pd.to_datetime(A["t"], utc=True)
         risk = tb.RISK_PCT
-        print(f"\n=== СИМУЛЯЦІЯ P&L на РЕАЛЬНИХ testnet-даних (ETH+SOL разом) ===")
+        src = "TESTNET (демо, тонка ліквідність!)" if tb.TESTNET else "МЕЙННЕТ (реальні ціни)"
+        print(f"\n=== СИМУЛЯЦІЯ P&L на даних: {src} (ETH+SOL разом) ===")
         print(f"Витрати: комісія {tb.FEE_RATE*100:.2f}%/сторону + слипи; ризик {risk*100:.0f}% від балансу (компаунд).")
         print(f"⚠️ Це НЕ реальний результат бота (він був зламаний Hedge Mode і не торгував) —")
         print(f"   це те, що стратегія зробила Б, якби ордери проходили:")
