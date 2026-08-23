@@ -821,6 +821,10 @@ def check_day_and_killswitch(st, eq):
     if st["day"] != today:
         st["day"] = today; st["day_start_equity"] = eq; st["halted"] = False
     dd = (eq - st["day_start_equity"]) / st["day_start_equity"] if st["day_start_equity"] else 0
+    if abs(dd) > 0.5:                     # >50% за день неможливо при ризику 3% -> це ЗМІНА БАЗИСУ
+        print(f"kill-switch: базис змінився ({st['day_start_equity']:.0f}->{eq:.0f}), ре-базис без стопу")
+        st["day_start_equity"] = eq; st["halted"] = False   # (перемикання режиму/балансу) не стоп
+        return False
     if dd <= -MAX_DAILY_LOSS and not st["halted"]:
         st["halted"] = True
         tg(f"🛑 KILL-SWITCH: денний збиток {dd*100:.1f}% > ліміту {MAX_DAILY_LOSS*100:.0f}%. "
